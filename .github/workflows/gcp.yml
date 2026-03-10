@@ -22,6 +22,7 @@ jobs:
         with:
           workload_identity_provider: projects/403931998915/locations/global/workloadIdentityPools/drishtii-github/providers/github
           service_account: drishtii-github@bustling-joy-488514-u2.iam.gserviceaccount.com
+          audience: https://iam.googleapis.com/projects/403931998915/locations/global/workloadIdentityPools/drishtii-github/providers/github
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
