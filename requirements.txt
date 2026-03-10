@@ -1,0 +1,8 @@
+apify-client
+fastapi
+uvicorn[standard]
+requests
+pydantic
+python-multipart
+groq
+dotenv
