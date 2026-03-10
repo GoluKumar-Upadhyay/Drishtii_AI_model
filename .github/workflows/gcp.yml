@@ -2,10 +2,11 @@ name: Connect GCP
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
-  test:
+  auth-test:
     runs-on: ubuntu-latest
 
     permissions:
@@ -13,15 +14,17 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: projects/403931998915/locations/global/workloadIdentityPools/drishtii-github/providers/github
           service_account: drishtii-github@bustling-joy-488514-u2.iam.gserviceaccount.com
-          audience: https://iam.googleapis.com/projects/403931998915/locations/global/workloadIdentityPools/drishtii-github/providers/github
 
-      - uses: google-github-actions/setup-gcloud@v2
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
 
-      - run: gcloud auth list
+      - name: Test Authentication
+        run: gcloud auth list
