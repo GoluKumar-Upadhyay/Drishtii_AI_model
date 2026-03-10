@@ -1,0 +1,25 @@
+name: Connect GCP
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/403931998915/locations/global/workloadIdentityPools/drishtii-github/providers/github
+          service_account: drishtii-github@bustling-joy-488514-u2.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth list
