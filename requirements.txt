@@ -4,5 +4,8 @@ uvicorn[standard]
 requests
 pydantic
 python-multipart
-groq
 dotenv
+google-cloud-aiplatform
+asyncpg
+psycopg2-binary
+redis

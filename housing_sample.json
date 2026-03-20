@@ -1,0 +1,419 @@
+[
+    {
+        "id": "53137",
+        "url": "/in/buy/projects/page/53137-sagar-artic-building-by-sagar-builders-in-andheri-west",
+        "name": "Sagar Artic Building",
+        "subtitle": "1, 2 BHK Flats",
+        "image_url": "https://is1-3.housingcdn.com/4f2250e8/84f25a12e9362d60d2e3ab127f472d18/v2/version/sagar_artic_building-andheri_west-mumbai-sagar_builders.jpeg",
+        "polygons_hash": {
+            "h_district": {
+                "url_name": null,
+                "name": null,
+                "display_name": null,
+                "uuid": null,
+                "is_proxy": null
+            },
+            "city": {
+                "url_name": "mumbai",
+                "name": "Mumbai",
+                "display_name": [
+                    "Mumbai",
+                    "Maharashtra"
+                ],
+                "uuid": "1ca99c33e3d8b987ccf1",
+                "is_proxy": true
+            },
+            "hotspot": {
+                "url_name": null,
+                "name": null,
+                "display_name": null,
+                "uuid": null,
+                "is_proxy": null
+            },
+            "neighbourhood": {
+                "url_name": null,
+                "name": null,
+                "display_name": null,
+                "uuid": null,
+                "is_proxy": null
+            },
+            "housing_region": {
+                "url_name": "western_suburbs_1",
+                "name": "Western Suburbs",
+                "display_name": [
+                    "Western Suburbs",
+                    "Mumbai"
+                ],
+                "uuid": "d135fb588e8bb80e1fa2",
+                "is_proxy": null
+            },
+            "locality": {
+                "url_name": "andheri_west",
+                "name": "Andheri West",
+                "display_name": [
+                    "Andheri West",
+                    "Mumbai"
+                ],
+                "uuid": "2195824f4c8e021d7b8e",
+                "is_proxy": null
+            },
+            "sublocality": {
+                "url_name": null,
+                "name": null,
+                "display_name": null,
+                "uuid": null,
+                "is_proxy": null
+            },
+            "state": {
+                "url_name": "maharashtra",
+                "name": "Maharashtra",
+                "display_name": [
+                    "Maharashtra",
+                    "India"
+                ],
+                "uuid": "82b2a9c2e9b437c9ffdc",
+                "is_proxy": null
+            },
+            "region": {
+                "url_name": "mmr",
+                "name": "Mumbai Metropolitan Region",
+                "display_name": [
+                    "MMR",
+                    "Maharashtra"
+                ],
+                "uuid": "7318a08bb6570a26e893",
+                "is_proxy": null
+            },
+            "housing_state": {
+                "url_name": null,
+                "name": null,
+                "display_name": null,
+                "uuid": null,
+                "is_proxy": null
+            }
+        },
+        "current_possession_status": "Under Construction",
+        "is_active_property": true,
+        "is_most_contacted": true,
+        "features": [
+            {
+                "label": "Configurations",
+                "description": "1, 2 BHK Flats",
+                "id": "configs"
+            },
+            {
+                "label": "Possession Starts",
+                "description": "Mar, 2026",
+                "id": "possession"
+            },
+            {
+                "label": "Avg. Price",
+                "description": "₹12.47 K/sq.ft",
+                "id": "avgPrice"
+            },
+            {
+                "label": "Sizes",
+                "description": "826 - 1062 sq.ft.",
+                "id": "sizeConfig"
+            }
+        ],
+        "min_price": 10300220,
+        "max_price": 13243140,
+        "currency": "₹",
+        "price_display_value": "₹1.03 Cr - 1.32 Cr",
+        "address": {
+            "address": "Andheri West, Mumbai",
+            "url": null,
+            "detailed_property_address": [
+                {
+                    "url": "/in/buy/projects/andheri_west",
+                    "val": "Andheri West,Mumbai"
+                }
+            ],
+            "distance_from_entity": null,
+            "long_address": "Andheri West, Western Suburbs, Mumbai"
+        },
+        "posted_date": "2018-01-05T17:58:27Z",
+        "promotions": [],
+        "custom_offers": [],
+        "suggested_offers": [],
+        "coords": [
+            "19.119095",
+            "72.839546"
+        ],
+        "property_information": {
+            "bedrooms": 1,
+            "bathrooms": null,
+            "parking": null,
+            "area": "826 sq.ft",
+            "price": "1.03 Cr"
+        },
+        "seller": [
+            {
+                "name": "Proptiger Marketing Services Private Limited",
+                "id": "c8c62436-be9d-44af-be47-19676edbb7b0",
+                "image": "https://is1-3.housingcdn.com/fb15c03b/c52967d25d83ea1542dd694214548156/v0/version.jpeg",
+                "firm_name": null,
+                "url": "/buy-property-by-kamlesh-harish-nawani-aid-39330356-Ahmjm8bba1j8lo77iqeenz4ckw",
+                "type": "Seller",
+                "is_prime": false,
+                "seller_badge": null,
+                "is_paid": true,
+                "designation": "Seller",
+                "formatted_customer_served_count": null,
+                "seller_overlay_color": null,
+                "seller_overlay_text_color": null,
+                "phone": {
+                    "partial_value": "92176....."
+                },
+                "is_certified_agent": null,
+                "is_certified_pro_agent": null,
+                "seller_tag": null,
+                "ad_deficit": -4.04,
+                "meta": {
+                    "primary_tags": [],
+                    "secondary_tags": [],
+                    "paid": true,
+                    "ad_deficit": -4.85,
+                    "price_range": "₹ 1.03 Cr - 1.32 Cr"
+                },
+                "contact_person_id": 1
+            }
+        ],
+        "emi": "₹51.14 K",
+        "brands": [
+            {
+                "name": "Sagar Builders",
+                "image": "https://is1-2.housingcdn.com/0b8ad14c/9ee11f21f0690798e28a2a69e049170e/v1/version.jpg",
+                "theme": null,
+                "url": "/buy-projects-by-sagar-builders-bid-168792-Aj5dop7mg0udst3f4u26fjww5d"
+            }
+        ],
+        "details": {
+            "avg_price_value": 12470,
+            "slice_view_url": null,
+            "images": [
+                {
+                    "type": "property",
+                    "images": [
+                        {
+                            "src": "https://is1-3.housingcdn.com/4f2250e8/84f25a12e9362d60d2e3ab127f472d18/v2/version/sagar_artic_building-andheri_west-mumbai-sagar_builders.jpeg",
+                            "alt": "Sagar Artic Building Project Images",
+                            "aspect_ratio": null,
+                            "is_sv_or_dc_verified": null,
+                            "category": "Project Images",
+                            "caption": "Project Images",
+                            "tag": "Project Images",
+                            "type": "image"
+                        },
+                        {
+                            "src": "https://is1-3.housingcdn.com/012c1500/82816a43ffb8e77fe9408580799a6c7b/v2/version.jpeg",
+                            "alt": "Project Image of 826.0 - 1062.0 Sq.ft 1 BHK Apartment for buy in Sagar Artic Building",
+                            "aspect_ratio": 1.06,
+                            "is_sv_or_dc_verified": false,
+                            "category": "Cluster Plan",
+                            "caption": "Images for Cluster Plan of Sagar Artic Building",
+                            "tag": "Project Images",
+                            "type": "image"
+                        },
+                        {
+                            "src": "https://is1-2.housingcdn.com/012c1500/08c77c678bc61fe5f9a9453ce53bb598/v0/version.jpeg",
+                            "alt": "Project Image of 826.0 - 1062.0 Sq.ft 1 BHK Apartment for buy in Sagar Artic Building",
+                            "aspect_ratio": null,
+                            "is_sv_or_dc_verified": false,
+                            "category": "Dining Area",
+                            "caption": "Dining Area",
+                            "tag": "Dining Area",
+                            "type": "image"
+                        },
+                        {
+                            "src": "https://is1-2.housingcdn.com/012c1500/0a7f9e4971931c6ee5fb71c9050687fb/v0/version.jpeg",
+                            "alt": "Project Image of 826.0 - 1062.0 Sq.ft 1 BHK Apartment for buy in Sagar Artic Building",
+                            "aspect_ratio": null,
+                            "is_sv_or_dc_verified": false,
+                            "category": "Living Area",
+                            "caption": "Living Area",
+                            "tag": "Living Area",
+                            "type": "image"
+                        },
+                        {
+                            "src": "https://is1-2.housingcdn.com/012c1500/8d89ae61e7e01917b08df5f430535769/v0/version.jpeg",
+                            "alt": "Project Image of 826.0 - 1062.0 Sq.ft 1 BHK Apartment for buy in Sagar Artic Building",
+                            "aspect_ratio": null,
+                            "is_sv_or_dc_verified": false,
+                            "category": "Location Plan",
+                            "caption": "Location Plan",
+                            "tag": "Project Images",
+                            "type": "image"
+                        },
+                        {
+                            "src": "https://is1-3.housingcdn.com/012c1500/f01f46442a711cd3704f57954859da82/v0/version.jpeg",
+                            "alt": "Project Image of 826.0 - 1062.0 Sq.ft 1 BHK Apartment for buy in Sagar Artic Building",
+                            "aspect_ratio": 1.1366666666666667,
+                            "is_sv_or_dc_verified": false,
+                            "category": "Master Plan",
+                            "caption": "Master Plan",
+                            "tag": "Project Images",
+                            "type": "image"
+                        }
+                    ]
+                },
+                {
+                    "type": "locality",
+                    "images": []
+                },
+                {
+                    "type": "floorPlan",
+                    "images": [
+                        {
+                            "src": "https://is1-3.housingcdn.com/91aba65c/5cacc205bf5b4d9bc3bdb8811a4279d2/v0/version.jpg",
+                            "alt": "Sagar Artic Building 3D 1",
+                            "aspect_ratio": null,
+                            "is_sv_or_dc_verified": null,
+                            "category": "Floor Plan",
+                            "caption": "3D",
+                            "tag": "1 BHK, 826 sq.ft.",
+                            "type": "image"
+                        },
+                        {
+                            "src": "https://is1-3.housingcdn.com/91aba65c/0e6f3ab535ea80fd45bb56239eb8366c/v0/version.png",
+                            "alt": "Sagar Artic Building 2D 2",
+                            "aspect_ratio": null,
+                            "is_sv_or_dc_verified": null,
+                            "category": "Floor Plan",
+                            "caption": "2D",
+                            "tag": "1 BHK, 826 sq.ft.",
+                            "type": "image"
+                        }
+                    ]
+                }
+            ],
+            "unique_amenities": [],
+            "config": {
+                "display_area_type": "Super Builtup Area",
+                "property_config": [
+                    {
+                        "key": "2",
+                        "label": "1 BHK Apartment",
+                        "property_type_name": "Apartment",
+                        "range": "1.03 Cr",
+                        "price_on_request": null,
+                        "data": [
+                            {
+                                "id": "214502",
+                                "price": {
+                                    "value": 10300220,
+                                    "display_value": "₹ 1.03 Cr",
+                                    "unit": null
+                                },
+                                "area_config": [
+                                    {
+                                        "name": "Super Builtup Area",
+                                        "area_info": {
+                                            "value": 826,
+                                            "unit": "sq.ft",
+                                            "display_area": "826"
+                                        }
+                                    }
+                                ],
+                                "project_attributes": {
+                                    "rera_id_status": "Rera"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "key": "3",
+                        "label": "2 BHK Apartment",
+                        "property_type_name": "Apartment",
+                        "range": "1.32 Cr",
+                        "price_on_request": null,
+                        "data": [
+                            {
+                                "id": "214504",
+                                "price": {
+                                    "value": 13243140,
+                                    "display_value": "₹ 1.32 Cr",
+                                    "unit": null
+                                },
+                                "area_config": [
+                                    {
+                                        "name": "Super Builtup Area",
+                                        "area_info": {
+                                            "value": 1062,
+                                            "unit": "sq.ft",
+                                            "display_area": "1062"
+                                        }
+                                    }
+                                ],
+                                "project_attributes": {
+                                    "rera_id_status": "Rera"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            "property_configs": [
+                {
+                    "id": "possessionDate",
+                    "icon": null,
+                    "label": "Possession Date",
+                    "description": "Mar, 2026",
+                    "meta": null,
+                    "show_on_mobile": null,
+                    "mobile_label": null,
+                    "formatted_description": null
+                },
+                {
+                    "id": "avgPrice",
+                    "icon": null,
+                    "label": "Average Price",
+                    "description": "₹12.47 K/sq.ft",
+                    "meta": null,
+                    "show_on_mobile": null,
+                    "mobile_label": null,
+                    "formatted_description": null
+                }
+            ],
+            "amenities": [
+                {
+                    "type": "Society Amenities",
+                    "data": [
+                        "Gym",
+                        "Parking"
+                    ]
+                }
+            ],
+            "brochure": {
+                "pdf": "https://housing-is-01.s3.amazonaws.com/6a32315a/a5163a426fff5e51da4f62ce586cdd20/original.pdf",
+                "name": "Sagar Artic Building Brochure",
+                "has_brochure": true
+            }
+        },
+        "property_tags": [
+            "Under Construction",
+            "Possession: Mar 2026",
+            "Project",
+            "RERA Approved"
+        ],
+        "description": "<p></p>",
+        "video_tours": null,
+        "highlights": [],
+        "near_by_places": [],
+        "insights": [
+            {
+                "id": "possession",
+                "value": "Under Construction"
+            },
+            {
+                "id": "apartments",
+                "value": "1, 2 BHK Flats"
+            },
+            {
+                "id": "possessionDate",
+                "value": "Possession: Mar, 2026"
+            }
+        ],
+        "from_url": "https://housing.com/in/buy/projects/Mumbai"
+    },
