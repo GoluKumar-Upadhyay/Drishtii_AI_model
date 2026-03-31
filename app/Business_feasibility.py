@@ -35,18 +35,24 @@ class Settings:
     DB_COMMAND_TIMEOUT:        int   = int(os.getenv("DB_COMMAND_TIMEOUT", "30"))
     REDIS_URL:                 str   = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     REDIS_MAX_CONNECTIONS:     int   = int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))
-    CACHE_TTL:                 int   = int(os.getenv("CACHE_TTL",       "3600"))
-    CACHE_EMPTY_TTL:           int   = int(os.getenv("CACHE_EMPTY_TTL", "120"))
+    CACHE_TTL:                 int   = int(os.getenv("CACHE_TTL",        "3600"))
+    CACHE_EMPTY_TTL:           int   = int(os.getenv("CACHE_EMPTY_TTL",  "120"))
     RATE_LIMIT_PER_MIN:        int   = int(os.getenv("RATE_LIMIT_PER_MIN", "20"))
     DEFAULT_PAGE_SIZE:         int   = int(os.getenv("DEFAULT_PAGE_SIZE",  "20"))
     MAX_PAGE_SIZE:             int   = int(os.getenv("MAX_PAGE_SIZE",      "100"))
     HIGH_STREET_THRESHOLD:     float = float(os.getenv("HIGH_STREET_THRESHOLD", "15000"))
     LOW_STREET_THRESHOLD:      float = float(os.getenv("LOW_STREET_THRESHOLD",  "5000"))
+    HIGH_STREET_RENT_THRESHOLD: float = float(os.getenv("HIGH_STREET_RENT_THRESHOLD",  "150"))
+    LOW_STREET_RENT_THRESHOLD:  float = float(os.getenv("LOW_STREET_RENT_THRESHOLD",    "40"))
+    PRICE_BAND_HIGH:           int   = int(os.getenv("PRICE_BAND_HIGH",  "30000000000"))
+    PRICE_BAND_MIDDLE:         int   = int(os.getenv("PRICE_BAND_MIDDLE", "50000000000"))
     GOOGLE_PLACES_API_KEY:     str   = os.getenv("GOOGLE_PLACES_API_KEY", "")
     GOOGLE_PLACES_CACHE_TTL:   int   = int(os.getenv("GOOGLE_PLACES_CACHE_TTL", str(60 * 60 * 24 * 30)))
     GOOGLE_PLACES_RADIUS:      int   = int(os.getenv("GOOGLE_PLACES_RADIUS", "500"))
     GOOGLE_PLACES_CONCURRENCY: int   = int(os.getenv("GOOGLE_PLACES_CONCURRENCY", "5"))
     CACHE_WARM_CONCURRENCY:    int   = int(os.getenv("CACHE_WARM_CONCURRENCY", "10"))
+    PREWARM_TIMEOUT_SECS:      int   = int(os.getenv("PREWARM_TIMEOUT_SECS", "120"))
+    ADMIN_API_KEY:             str   = os.getenv("ADMIN_API_KEY", "")
 
 settings = Settings()
 
@@ -70,26 +76,40 @@ _metrics: Dict[str, int] = {
     "magicbricks_price_filtered":  0,
 }
 
+
 def inc(key: str, n: int = 1) -> None:
+    
     _metrics[key] = _metrics.get(key, 0) + n
+    if redis_client is not None:
+        try:
+            asyncio.get_running_loop().create_task(_redis_inc(key, n))
+        except RuntimeError:
+            pass
 
 
-redis_client:  redis.Redis        = None
-_db_pool:      asyncpg.Pool       = None
-_http_client:  httpx.AsyncClient  = None
-_gp_semaphore: asyncio.Semaphore  = None
-
-
-async def inc(key: str, n: int = 1) -> None:
-    _metrics[key] = _metrics.get(key, 0) + n
+async def _redis_inc(key: str, n: int) -> None:
     try:
         await redis_client.hincrby("biz:metrics:global", key, n)
     except Exception:
         pass
 
 
+redis_client:  Optional[redis.Redis]       = None
+_db_pool:      Optional[asyncpg.Pool]      = None
+_http_client:  Optional[httpx.AsyncClient] = None
+_gp_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    return _http_client
+
+
+def get_gp_semaphore() -> asyncio.Semaphore:
+    return _gp_semaphore
+
+
 async def _prewarm_google_places_cache() -> None:
-    logger.info("[PREWARM] Starting Google Places cache pre-warm for all MagicBricks coordinates")
+    logger.info("[PREWARM] Starting Google Places cache pre-warm")
     rows = await _db_fetch("""
         SELECT DISTINCT scraped_data->>'location' AS location
         FROM property_raw_data
@@ -115,31 +135,27 @@ async def _prewarm_google_places_cache() -> None:
             continue
 
     unique_coords = list(set(coords))
-    logger.info(f"[PREWARM] Found {len(unique_coords)} unique coordinates to check")
+    logger.info(f"[PREWARM] Found {len(unique_coords)} unique coordinates")
 
     already_cached = 0
-    to_fetch:       List[Tuple[float, float]] = []
+    to_fetch: List[Tuple[float, float]] = []
     for lat, lng in unique_coords:
-        cache_key = f"gp:area:{lat}:{lng}"
-        cached    = await RedisCache.get(cache_key)
+        cached = await RedisCache.get(f"gp:area:{lat}:{lng}")
         if cached is not None:
             already_cached += 1
         else:
             to_fetch.append((lat, lng))
 
-    logger.info(
-        f"[PREWARM] already_cached={already_cached} "
-        f"need_api_call={len(to_fetch)}"
-    )
+    logger.info(f"[PREWARM] already_cached={already_cached} need_api_call={len(to_fetch)}")
 
     if not to_fetch:
         logger.info("[PREWARM] All coordinates already cached — nothing to do")
         return
 
-    sem      = asyncio.Semaphore(settings.CACHE_WARM_CONCURRENCY)
-    done     = 0
-    errors   = 0
-    t0       = time.monotonic()
+    sem    = asyncio.Semaphore(settings.CACHE_WARM_CONCURRENCY)
+    done   = 0
+    errors = 0
+    t0     = time.monotonic()
 
     async def _warm_one(lat: float, lng: float) -> None:
         nonlocal done, errors
@@ -148,21 +164,28 @@ async def _prewarm_google_places_cache() -> None:
                 await _get_area_type_from_coordinates(lat, lng)
                 done += 1
                 if done % 50 == 0:
-                    elapsed = round(time.monotonic() - t0, 1)
                     logger.info(
                         f"[PREWARM] Progress: {done}/{len(to_fetch)} "
-                        f"errors={errors} elapsed={elapsed}s"
+                        f"errors={errors} elapsed={round(time.monotonic()-t0,1)}s"
                     )
             except Exception as e:
                 errors += 1
                 logger.warning(f"[PREWARM] Failed lat={lat} lng={lng}: {e}")
 
-    await asyncio.gather(*[_warm_one(lat, lng) for lat, lng in to_fetch])
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*[_warm_one(lat, lng) for lat, lng in to_fetch]),
+            timeout=settings.PREWARM_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[PREWARM] Timed out after {settings.PREWARM_TIMEOUT_SECS}s — "
+            f"warmed={done}/{len(to_fetch)} remaining will warm on first request"
+        )
 
-    elapsed = round(time.monotonic() - t0, 1)
     logger.info(
         f"[PREWARM] Complete: warmed={done} errors={errors} "
-        f"already_cached={already_cached} elapsed={elapsed}s"
+        f"elapsed={round(time.monotonic()-t0,1)}s"
     )
 
 
@@ -176,7 +199,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("DATABASE_URL env var is not set — cannot start")
 
     _http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0),
+        timeout=httpx.Timeout(connect=3.0, read=10.0, write=3.0, pool=3.0),
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
     logger.info("[STARTUP] HTTP client ready")
@@ -203,11 +226,7 @@ async def lifespan(app: FastAPI):
     logger.info("[STARTUP] Redis ready")
 
     _gp_semaphore = asyncio.Semaphore(settings.GOOGLE_PLACES_CONCURRENCY)
-    logger.info(
-        f"[STARTUP] Google Places semaphore ready "
-        f"concurrency={settings.GOOGLE_PLACES_CONCURRENCY}"
-    )
-
+    logger.info(f"[STARTUP] Google Places semaphore ready concurrency={settings.GOOGLE_PLACES_CONCURRENCY}")
     logger.info(
         f"[STARTUP] Cache TTL={settings.CACHE_TTL}s "
         f"empty_TTL={settings.CACHE_EMPTY_TTL}s "
@@ -215,13 +234,10 @@ async def lifespan(app: FastAPI):
     )
 
     if settings.GOOGLE_PLACES_API_KEY:
-        logger.info("[STARTUP] Running Google Places cache pre-warm")
-        await _prewarm_google_places_cache()
+        logger.info("[STARTUP] Running Google Places cache pre-warm in background")
+        asyncio.get_running_loop().create_task(_prewarm_google_places_cache())
     else:
-        logger.warning(
-            "[STARTUP] GOOGLE_PLACES_API_KEY not set — "
-            "skipping pre-warm, area type falls back to price/sqft only"
-        )
+        logger.warning("[STARTUP] GOOGLE_PLACES_API_KEY not set — skipping pre-warm")
 
     logger.info("[STARTUP] All resources ready — serving traffic")
     yield
@@ -231,14 +247,6 @@ async def lifespan(app: FastAPI):
     await _db_pool.close()
     await redis_client.aclose()
     logger.info("[SHUTDOWN] Clean shutdown complete")
-
-
-def get_http_client() -> httpx.AsyncClient:
-    return _http_client
-
-
-def get_gp_semaphore() -> asyncio.Semaphore:
-    return _gp_semaphore
 
 
 class RedisCache:
@@ -274,9 +282,7 @@ class RedisCache:
             keys:   List[str] = []
             cursor: int       = 0
             while True:
-                cursor, batch = await redis_client.scan(
-                    cursor, match=f"{prefix}*", count=100
-                )
+                cursor, batch = await redis_client.scan(cursor, match=f"{prefix}*", count=100)
                 keys.extend(batch)
                 if cursor == 0:
                     break
@@ -304,13 +310,10 @@ class RedisRateLimiter:
                 inc("rate_limited")
                 logger.warning(
                     f"[RATE_LIMIT] BLOCKED ip={ip} prefix={prefix} "
-                    f"count={count}/{settings.RATE_LIMIT_PER_MIN} in last 60s"
+                    f"count={count}/{settings.RATE_LIMIT_PER_MIN}"
                 )
                 return True
-            logger.debug(
-                f"[RATE_LIMIT] ALLOWED ip={ip} prefix={prefix} "
-                f"count={count}/{settings.RATE_LIMIT_PER_MIN}"
-            )
+            logger.debug(f"[RATE_LIMIT] ALLOWED ip={ip} count={count}/{settings.RATE_LIMIT_PER_MIN}")
             return False
         except Exception as e:
             logger.warning(f"[RATE_LIMIT] Redis error (fail-open): {e}")
@@ -329,26 +332,6 @@ def _extract_client_ip(request: Request) -> str:
 
 def normalize_city_input(city: str) -> str:
     return city.strip().title()
-
-
-def extract_city_from_99acres_url(page_url: str) -> Optional[str]:
-    if not page_url:
-        return None
-    try:
-        parsed  = urlparse(page_url)
-        params  = parse_qs(parsed.query)
-        keyword = params.get("keyword", [None])[0]
-        if keyword and keyword.strip():
-            return keyword.strip().title()
-    except Exception:
-        pass
-    try:
-        m = re.search(r"/([a-z][a-z\-]+[a-z])-ffid", page_url, re.IGNORECASE)
-        if m:
-            return m.group(1).replace("-", " ").strip().title()
-    except Exception:
-        pass
-    return None
 
 
 _HIGH_STREET_PLACE_TYPES: frozenset = frozenset([
@@ -370,11 +353,6 @@ _LOW_STREET_PLACE_TYPES: frozenset = frozenset([
     "hardware_store", "gas_station", "rv_park",
 ])
 
-_GENERIC_ZONE_NOISE: frozenset = frozenset([
-    "business park", "commercial zone", "it park", "tech park",
-    "it/ites", "software park", "it hub", "campus",
-])
-
 
 def _parse_coordinates(item: dict) -> Tuple[Optional[float], Optional[float]]:
     raw = item.get("location")
@@ -387,10 +365,7 @@ def _parse_coordinates(item: dict) -> Tuple[Optional[float], Optional[float]]:
         lat = float(parts[0].strip())
         lng = float(parts[1].strip())
         if not (6.0 <= lat <= 37.0 and 68.0 <= lng <= 97.0):
-            logger.warning(
-                f"[COORDS] Out-of-India bounds id={item.get('id')} "
-                f"lat={lat} lng={lng} — skipping Google Places"
-            )
+            logger.warning(f"[COORDS] Out-of-India bounds id={item.get('id')} lat={lat} lng={lng}")
             return None, None
         return lat, lng
     except (ValueError, TypeError):
@@ -399,63 +374,34 @@ def _parse_coordinates(item: dict) -> Tuple[Optional[float], Optional[float]]:
 
 async def _call_google_places_api(lat: float, lng: float) -> str:
     if not settings.GOOGLE_PLACES_API_KEY:
-        logger.warning(
-            "[GOOGLE_PLACES] No API key — all rows use price/sqft detection only"
-        )
+        logger.warning("[GOOGLE_PLACES] No API key — using price/sqft detection only")
         return "middle_street"
 
-    call_n = _metrics["google_places_calls"] + 1
     inc("google_places_calls")
-    logger.info(
-        f"[GOOGLE_PLACES] ── API call #{call_n} ──────────────────────────────"
-    )
-    logger.info(
-        f"[GOOGLE_PLACES] call#{call_n} lat={lat} lng={lng} "
-        f"radius={settings.GOOGLE_PLACES_RADIUS}m "
-        f"concurrency_limit={settings.GOOGLE_PLACES_CONCURRENCY} "
-        f"lifetime_calls_so_far={call_n-1} cache_hits={_metrics['google_places_cache_hits']}"
-    )
+    call_n = _metrics["google_places_calls"]
+    logger.info(f"[GOOGLE_PLACES] API call #{call_n} lat={lat} lng={lng} radius={settings.GOOGLE_PLACES_RADIUS}m")
 
     async with get_gp_semaphore():
         t0 = time.monotonic()
         try:
-            client = get_http_client()
-            resp   = await client.get(
+            resp = await get_http_client().get(
                 "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
-                params={
-                    "location": f"{lat},{lng}",
-                    "radius":   settings.GOOGLE_PLACES_RADIUS,
-                    "key":      settings.GOOGLE_PLACES_API_KEY,
-                },
+                params={"location": f"{lat},{lng}", "radius": settings.GOOGLE_PLACES_RADIUS, "key": settings.GOOGLE_PLACES_API_KEY},
             )
             elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
             resp.raise_for_status()
             data   = resp.json()
             status = data.get("status", "")
 
-            logger.info(
-                f"[GOOGLE_PLACES] call#{call_n} response: "
-                f"http_status={resp.status_code} api_status={status} elapsed={elapsed_ms}ms"
-            )
+            logger.info(f"[GOOGLE_PLACES] call#{call_n} status={status} elapsed={elapsed_ms}ms")
 
             if status not in ("OK", "ZERO_RESULTS"):
-                logger.error(
-                    f"[GOOGLE_PLACES] call#{call_n} API error: "
-                    f"status={status} lat={lat} lng={lng} "
-                    f"error_message={data.get('error_message', 'none')} "
-                    f"→ fallback middle_street"
-                )
+                logger.error(f"[GOOGLE_PLACES] call#{call_n} API error status={status} lat={lat} lng={lng} error={data.get('error_message','none')}")
                 inc("google_places_errors")
                 return "middle_street"
 
-            results     = data.get("results", [])
-            place_count = len(results)
-
+            results = data.get("results", [])
             if not results:
-                logger.info(
-                    f"[GOOGLE_PLACES] call#{call_n} ZERO_RESULTS "
-                    f"lat={lat} lng={lng} → middle_street"
-                )
                 inc("google_places_middle_street")
                 return "middle_street"
 
@@ -482,49 +428,22 @@ async def _call_google_places_api(lat: float, lng: float) -> str:
                 inc("google_places_middle_street")
 
             logger.info(
-                f"[GOOGLE_PLACES] call#{call_n} scoring: "
-                f"places_found={place_count} "
-                f"high_score={high_score}/4 ({sorted(high_hits)}) "
-                f"low_score={low_score}/3 ({sorted(low_hits)}) "
-                f"→ {area_type.upper()}"
-            )
-            logger.info(
-                f"[GOOGLE_PLACES] call#{call_n} nearby: {place_names[:6]}"
-            )
-            logger.info(
-                f"[GOOGLE_PLACES] running totals: "
-                f"calls={_metrics['google_places_calls']} "
-                f"cache_hits={_metrics['google_places_cache_hits']} "
-                f"high={_metrics['google_places_high_street']} "
-                f"middle={_metrics['google_places_middle_street']} "
-                f"low={_metrics['google_places_low_street']} "
-                f"errors={_metrics['google_places_errors']}"
+                f"[GOOGLE_PLACES] call#{call_n} places={len(results)} "
+                f"high={high_score}/4 low={low_score}/3 → {area_type.upper()} "
+                f"nearby={place_names[:5]}"
             )
             return area_type
 
         except httpx.TimeoutException:
-            elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
-            logger.error(
-                f"[GOOGLE_PLACES] call#{call_n} TIMEOUT "
-                f"lat={lat} lng={lng} elapsed={elapsed_ms}ms → middle_street"
-            )
+            logger.error(f"[GOOGLE_PLACES] call#{call_n} TIMEOUT lat={lat} lng={lng} elapsed={round((time.monotonic()-t0)*1000,1)}ms")
             inc("google_places_errors")
             return "middle_street"
         except httpx.HTTPStatusError as e:
-            elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
-            logger.error(
-                f"[GOOGLE_PLACES] call#{call_n} HTTP {e.response.status_code} "
-                f"lat={lat} lng={lng} elapsed={elapsed_ms}ms → middle_street"
-            )
+            logger.error(f"[GOOGLE_PLACES] call#{call_n} HTTP {e.response.status_code} lat={lat} lng={lng}")
             inc("google_places_errors")
             return "middle_street"
         except Exception as e:
-            elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
-            logger.error(
-                f"[GOOGLE_PLACES] call#{call_n} unexpected error "
-                f"lat={lat} lng={lng} elapsed={elapsed_ms}ms: {e}",
-                exc_info=True,
-            )
+            logger.error(f"[GOOGLE_PLACES] call#{call_n} unexpected error lat={lat} lng={lng}: {e}", exc_info=True)
             inc("google_places_errors")
             return "middle_street"
 
@@ -537,52 +456,29 @@ async def _get_area_type_from_coordinates(lat: float, lng: float) -> str:
     cached = await RedisCache.get(cache_key)
     if cached is not None:
         inc("google_places_cache_hits")
-        logger.info(
-            f"[GOOGLE_PLACES] Cache HIT {cache_key} → {cached} "
-            f"(saves an API call — lifetime hits={_metrics['google_places_cache_hits']} "
-            f"calls={_metrics['google_places_calls']})"
-        )
+        logger.info(f"[GOOGLE_PLACES] Cache HIT {cache_key} → {cached} hits={_metrics['google_places_cache_hits']}")
         return cached
 
-    logger.info(
-        f"[GOOGLE_PLACES] Cache MISS {cache_key} — calling API "
-        f"(lifetime hits={_metrics['google_places_cache_hits']} "
-        f"calls={_metrics['google_places_calls']})"
-    )
     area_type = await _call_google_places_api(lat_r, lng_r)
-
-    await redis_client.setex(
-        cache_key,
-        settings.GOOGLE_PLACES_CACHE_TTL,
-        json.dumps(area_type),
-    )
-    logger.info(
-        f"[GOOGLE_PLACES] Stored in cache: {cache_key} = {area_type} "
-        f"TTL={settings.GOOGLE_PLACES_CACHE_TTL}s (30 days)"
-    )
+    await redis_client.setex(cache_key, settings.GOOGLE_PLACES_CACHE_TTL, json.dumps(area_type))
+    logger.info(f"[GOOGLE_PLACES] Cached {cache_key} = {area_type} TTL={settings.GOOGLE_PLACES_CACHE_TTL}s")
     return area_type
 
 
-
 _UI_CATEGORY_MAP: Dict[str, List[str]] = {
-    "office_space": [
-        "ready_to_move_office", "bare_shell_office", "office_space",
-        "retail_mall_office", "it_park_office", "business_park_office",
-        "business_center",
-    ],
-    "shop_showroom":      ["shop", "showroom"],
-    "commercial_land":    ["commercial_land"],
-    "coworking":          ["coworking"],
-    "warehouse_godown":   ["warehouse_godown"],
+    "office_space":        ["ready_to_move_office", "bare_shell_office", "office_space"],
+    "shop_showroom":       ["shop", "showroom"],
+    "commercial_land":     ["commercial_land"],
+    "coworking":           ["coworking"],
+    "warehouse_godown":    ["warehouse_godown"],
     "industrial_building": ["industrial_building"],
-    "industrial_shed":    ["industrial_shed"],
+    "industrial_shed":     ["industrial_shed"],
 }
 
 PROPERTY_TYPE_KEYWORDS: Dict[str, List[str]] = {
     "ready_to_move_office": [
         "ready to move office space", "ready to move office",
-        "ready-to-move office", "rtm office",
-        "ready to move",
+        "ready-to-move office", "rtm office", "ready to move",
     ],
     "bare_shell_office": [
         "bare shell office space", "bare shell office",
@@ -592,37 +488,29 @@ PROPERTY_TYPE_KEYWORDS: Dict[str, List[str]] = {
         "commercial office space", "office space",
         "ready to move office space", "ready to move office",
         "ready-to-move office", "rtm office", "ready to move",
-        "bare shell office space", "bare shell office",
-        "bare-shell office", "bareshell",
+        "bare shell office space", "bare shell office", "bare-shell office", "bareshell",
         "space in a retail mall", "retail mall",
         "office in an it park", "it park office",
         "office in a business park", "business park office",
-        "business center", "business centre",
-        "time share",
+        "business center", "business centre", "time share",
     ],
     "shop_showroom": [
         "shop for sale", "shop for rent", "commercial shop", "shop",
         "showroom for sale", "showroom for rent", "commercial showroom", "showroom",
     ],
-    "shop": [
-        "shop for sale", "shop for rent", "commercial shop", "shop",
-    ],
-    "showroom": [
-        "showroom for sale", "showroom for rent", "commercial showroom", "showroom",
-    ],
+    "shop":     ["shop for sale", "shop for rent", "commercial shop", "shop"],
+    "showroom": ["showroom for sale", "showroom for rent", "commercial showroom", "showroom"],
     "commercial_land": [
         "commercial plot", "commercial land", "commercial plot / land",
         "commercial/inst. land", "commercial institutional land",
-        "commercial/industrial land",
-        "plot",
+        "commercial/industrial land", "plot",
     ],
     "farm_land": [
         "agricultural", "farm", "agriculture land", "farm land",
         "farm / agriculture", "agricultural/farm land",
     ],
     "industrial_land": [
-        "industrial land", "industrial plot", "industrial land / plot",
-        "industrial lands/plots",
+        "industrial land", "industrial plot", "industrial land / plot", "industrial lands/plots",
     ],
     "warehouse_godown": [
         "warehouse", "godown", "warehouse-godown",
@@ -632,52 +520,39 @@ PROPERTY_TYPE_KEYWORDS: Dict[str, List[str]] = {
     "factory":             ["factory"],
     "industrial_building": ["industrial building", "industrial-building"],
     "industrial_shed":     ["industrial shed", "industrial-shed"],
-    "hotel_resort": [
-        "hotel", "resort", "hotel/resort", "hotel resort", "guest house",
-    ],
-    "restaurant": [
-        "restaurant", "food court", "cafe", "cafeteria", "cloud kitchen",
-    ],
-    "coworking": [
-        "coworking", "co-working", "co working", "coworking space",
-    ],
-    "manufacturing": [
-        "manufacturing", "manufacturing business", "manufacturing unit",
-    ],
-    "all": [],
+    "hotel_resort":        ["hotel", "resort", "hotel/resort", "hotel resort", "guest house"],
+    "restaurant":          ["restaurant", "food court", "cafe", "cafeteria", "cloud kitchen"],
+    "coworking":           ["coworking", "co-working", "co working", "coworking space"],
+    "manufacturing":       ["manufacturing", "manufacturing business", "manufacturing unit"],
+    "all":                 [],
 }
 
-_MB_OFFICE_TYPES: frozenset = frozenset([
-    "office_space", "ready_to_move_office", "bare_shell_office",
-])
-
 _MB_TYPE_MAP: Dict[str, List[str]] = {
-    "office_space":        ["commercial office space", "office space", "business center", "business centre"],
+    "office_space":         ["commercial office space", "office space", "business center", "business centre"],
     "ready_to_move_office": ["commercial office space", "office space"],
-    "bare_shell_office":   ["commercial office space", "office space"],
-    "shop_showroom":       ["commercial shop", "commercial showroom", "shop", "showroom"],
-    "shop":                ["commercial shop", "shop"],
-    "showroom":            ["commercial showroom", "showroom"],
-    "warehouse_godown":    ["warehouse", "godown"],
-    "industrial_building": ["industrial building"],
-    "industrial_shed":     ["industrial shed"],
-    "commercial_land":     ["commercial land", "land"],
-    "farm_land":           ["farm land", "agricultural land", "farm"],
-    "industrial_land":     ["industrial land"],
-    "coworking":           ["coworking", "co-working"],
-    "hotel_resort":        ["hotel", "resort"],
-    "factory":             ["factory"],
-    "cold_storage":        ["cold storage"],
-    "manufacturing":       ["manufacturing"],
-    "restaurant":          ["restaurant", "cafe", "food court"],
+    "bare_shell_office":    ["commercial office space", "office space"],
+    "shop_showroom":        ["commercial shop", "commercial showroom", "shop", "showroom"],
+    "shop":                 ["commercial shop", "shop"],
+    "showroom":             ["commercial showroom", "showroom"],
+    "warehouse_godown":     ["warehouse", "godown"],
+    "industrial_building":  ["industrial building"],
+    "industrial_shed":      ["industrial shed"],
+    "commercial_land":      ["commercial land", "land"],
+    "farm_land":            ["farm land", "agricultural land", "farm"],
+    "industrial_land":      ["industrial land"],
+    "coworking":            ["coworking", "co-working"],
+    "hotel_resort":         ["hotel", "resort"],
+    "factory":              ["factory"],
+    "cold_storage":         ["cold storage"],
+    "manufacturing":        ["manufacturing"],
+    "restaurant":           ["restaurant", "cafe", "food court"],
 }
 
 
 def matches_property_type(item: dict, requested_type: str) -> bool:
     if requested_type == "all":
         return True
-
-    keywords = PROPERTY_TYPE_KEYWORDS.get(requested_type, [])
+    keywords  = PROPERTY_TYPE_KEYWORDS.get(requested_type, [])
     if not keywords:
         return True
 
@@ -701,40 +576,30 @@ def matches_property_type(item: dict, requested_type: str) -> bool:
         for part in [p.strip() for p in text.split(",")]:
             if any(kw in part for kw in keywords):
                 return True
-
     return False
 
 
 ZONE_KEYWORDS: Dict[str, List[str]] = {
     "front_shop": [
-        "ground floor", "main road", "highway facing",
-        "street facing", "high street", "main street",
-        "g floor", "gf", "ground level", "roadside",
-        "road facing", "ground", "front",
+        "ground floor", "main road", "highway facing", "street facing",
+        "high street", "main street", "g floor", "gf", "ground level",
+        "roadside", "road facing", "ground", "front",
     ],
     "first_floor": [
         "first floor", "1st floor", "1 floor", "floor 1",
         "above ground", "first level", "floor no 1",
     ],
     "back_site": [
-        "back", "rear", "interior", "basement",
-        "midc", "it park", "business park",
-        "commercial zone", "tech park", "it/ites",
+        "back", "rear", "interior", "basement", "midc", "it park",
+        "business park", "commercial zone", "tech park", "it/ites",
         "software park", "it hub", "campus",
     ],
 }
 
 _MEANINGFUL_ZONE_KEYWORDS: Dict[str, List[str]] = {
-    "front_shop": [
-        "ground floor", "main road", "highway facing", "street facing",
-        "high street", "main street", "road facing",
-    ],
-    "first_floor": [
-        "first floor", "1st floor", "floor 1", "above ground", "first level",
-    ],
-    "back_site": [
-        "back", "rear", "interior", "basement", "midc",
-    ],
+    "front_shop":  ["ground floor", "main road", "highway facing", "street facing", "high street", "main street", "road facing"],
+    "first_floor": ["first floor", "1st floor", "floor 1", "above ground", "first level"],
+    "back_site":   ["back", "rear", "interior", "basement", "midc"],
 }
 
 
@@ -775,27 +640,20 @@ def matches_zone(item: dict, zone: str) -> bool:
         any(kw in combined for kw in _MEANINGFUL_ZONE_KEYWORDS.get(z, []))
         for z in other_zones
     )
-
     if not matches_other_meaningful:
         return True
-
     return False
 
 
 _NO_AREA_VALUES: frozenset = frozenset([
     "bare bhk", "bare", "bhk", "rk", "n/a", "see config",
-    "see configurations", "studio", "ready bhk", "shop bhk",
-    "na", "none", "",
+    "see configurations", "studio", "ready bhk", "shop bhk", "na", "none", "",
 ])
 
 
 def _extract_area_sqft(item: dict) -> Optional[float]:
     source = item.get("_source", "")
-
-    if source == "magicbricks":
-        area_fields = ("covered_area", "carpet_area")
-    else:
-        area_fields = ("carpet_area", "covered_area")
+    area_fields = ("covered_area", "carpet_area") if source == "magicbricks" else ("carpet_area", "covered_area")
 
     for field in area_fields:
         val = item.get(field)
@@ -829,20 +687,25 @@ def _extract_area_sqft(item: dict) -> Optional[float]:
                         return val
                 except (ValueError, TypeError):
                     pass
-
     return None
 
 
-def _classify_ppsf(ppsf: float) -> str:
-    if ppsf >= settings.HIGH_STREET_THRESHOLD:
-        return "high_street"
-    if ppsf <= settings.LOW_STREET_THRESHOLD:
-        return "low_street"
+def _classify_ppsf(ppsf: float, listing_type: str = "commercial_buy") -> str:
+    if listing_type == "commercial_rent":
+        high_t = settings.HIGH_STREET_RENT_THRESHOLD
+        low_t  = settings.LOW_STREET_RENT_THRESHOLD
+    else:
+        high_t = settings.HIGH_STREET_THRESHOLD
+        low_t  = settings.LOW_STREET_THRESHOLD
+
+    if ppsf >= high_t: return "high_street"
+    if ppsf <= low_t:  return "low_street"
     return "middle_street"
 
 
 def _detect_area_type_sync(item: dict) -> Optional[str]:
-    source = item.get("_source", "")
+    source       = item.get("_source", "")
+    listing_type = item.get("_listing_type", "commercial_buy") 
     ppsf:   Optional[float] = None
     method: str             = ""
 
@@ -851,8 +714,7 @@ def _detect_area_type_sync(item: dict) -> Optional[str]:
         try:
             v = float(mb_ppsf)
             if v > 0:
-                ppsf   = v
-                method = "mb_price_per_sqft_field"
+                ppsf, method = v, "mb_price_per_sqft_field"
         except (ValueError, TypeError):
             pass
 
@@ -864,8 +726,7 @@ def _detect_area_type_sync(item: dict) -> Optional[str]:
                 try:
                     v = float(digits)
                     if v > 0:
-                        ppsf   = v
-                        method = "99acres_pricePerSqft_string"
+                        ppsf, method = v, "99acres_pricePerSqft_string"
                 except (ValueError, TypeError):
                     pass
 
@@ -877,35 +738,11 @@ def _detect_area_type_sync(item: dict) -> Optional[str]:
             method = f"derived(price={price:.0f}/area={area:.0f})"
 
     if ppsf is not None:
-        result = _classify_ppsf(ppsf)
-        logger.debug(
-            f"[AREA_TYPE_SYNC] id={item.get('id')} source={source} "
-            f"method={method} ppsf=₹{ppsf:.0f} "
-            f"[low<={settings.LOW_STREET_THRESHOLD} high>={settings.HIGH_STREET_THRESHOLD}] "
-            f"→ {result}"
-        )
+        result = _classify_ppsf(ppsf, listing_type)  
+        logger.debug(f"[AREA_TYPE_SYNC] id={item.get('id')} method={method} ppsf=₹{ppsf:.0f} listing={listing_type} → {result}")
         return result
 
-    if source == "99acres":
-        price = item.get("_price_numeric")
-        if price:
-            if price >= 30_000_000:
-                result = "high_street"
-            elif price >= 5_000_000:
-                result = "middle_street"
-            else:
-                result = "low_street"
-            logger.debug(
-                f"[AREA_TYPE_SYNC] id={item.get('id')} source=99acres "
-                f"method=price_band price=₹{price:,.0f} → {result}"
-            )
-            return result
-
-    logger.debug(
-        f"[AREA_TYPE_SYNC] id={item.get('id')} source={source} "
-        f"no sync signal available — will attempt Google Places"
-    )
-    return None
+    
 
 
 async def detect_area_type(item: dict) -> str:
@@ -915,16 +752,10 @@ async def detect_area_type(item: dict) -> str:
 
     lat, lng = _parse_coordinates(item)
     if lat is not None and lng is not None:
-        logger.info(
-            f"[AREA_TYPE] id={item.get('id')} source={item.get('_source')} "
-            f"no ppsf/price-band → escalating to Google Places lat={lat} lng={lng}"
-        )
+        logger.info(f"[AREA_TYPE] id={item.get('id')} no ppsf → Google Places lat={lat} lng={lng}")
         return await _get_area_type_from_coordinates(lat, lng)
 
-    logger.debug(
-        f"[AREA_TYPE] id={item.get('id')} source={item.get('_source')} "
-        f"no ppsf, no coordinates → default middle_street"
-    )
+    logger.debug(f"[AREA_TYPE] id={item.get('id')} no ppsf, no coords → default middle_street")
     return "middle_street"
 
 
@@ -961,13 +792,7 @@ async def _db_fetch(sql: str, *args) -> List[asyncpg.Record]:
 async def fetch_99acres_commercial(
     city: str, min_price: float, max_price: float, listing_type: str
 ) -> List[dict]:
-    logger.info(
-        f"[99ACRES] ── Fetch start ──────────────────────────────────────────"
-    )
-    logger.info(
-        f"[99ACRES] city={city!r} listing_type={listing_type} "
-        f"price_range=[₹{min_price:,.0f} – ₹{max_price:,.0f}]"
-    )
+    logger.info(f"[99ACRES] city={city!r} listing_type={listing_type} price=[₹{min_price:,.0f}–₹{max_price:,.0f}]")
 
     sql = """
         SELECT scraped_data
@@ -983,19 +808,11 @@ async def fetch_99acres_commercial(
           AND scraped_data->>'priceRange' NOT ILIKE '%on request%'
     """
     t0   = time.monotonic()
-    rows = await _db_fetch(
-        sql,
-        listing_type,
-        f"%keyword={city}%",
-        f"%keyword={city.lower()}%",
-    )
+    rows = await _db_fetch(sql, listing_type, f"%keyword={city}%", f"%keyword={city.lower()}%")
     db_ms = round((time.monotonic() - t0) * 1000, 1)
 
     inc("99acres_rows_fetched", len(rows))
-    logger.info(
-        f"[99ACRES] DB returned {len(rows)} rows in {db_ms}ms "
-        f"(matching city={city!r} in pageUrl keyword param)"
-    )
+    logger.info(f"[99ACRES] DB returned {len(rows)} rows in {db_ms}ms")
 
     out:                  List[dict] = []
     seen_ids:             set        = set()
@@ -1007,11 +824,7 @@ async def fetch_99acres_commercial(
     for i, row in enumerate(rows):
         try:
             raw  = row["scraped_data"]
-            item = (
-                json.loads(raw) if isinstance(raw, str)
-                else raw         if isinstance(raw, dict)
-                else None
-            )
+            item = json.loads(raw) if isinstance(raw, str) else raw if isinstance(raw, dict) else None
             if item is None:
                 skipped_parse_error += 1
                 continue
@@ -1019,10 +832,6 @@ async def fetch_99acres_commercial(
             listing_id = item.get("id", "")
             if listing_id and listing_id in seen_ids:
                 skipped_duplicate += 1
-                logger.debug(
-                    f"[99ACRES] Row {i} id={listing_id} "
-                    f"skipped: duplicate (same listing scraped from multiple pageUrl prop_type params)"
-                )
                 continue
             if listing_id:
                 seen_ids.add(listing_id)
@@ -1031,18 +840,10 @@ async def fetch_99acres_commercial(
             price     = _parse_99acres_price(price_str)
             if price is None:
                 skipped_no_price += 1
-                logger.debug(
-                    f"[99ACRES] Row {i} id={item.get('id')} "
-                    f"skipped: could not parse price='{price_str}'"
-                )
                 continue
 
             if not (min_price <= price <= max_price):
                 skipped_price_range += 1
-                logger.debug(
-                    f"[99ACRES] Row {i} id={item.get('id')} "
-                    f"skipped: ₹{price:,.0f} outside [₹{min_price:,.0f}–₹{max_price:,.0f}]"
-                )
                 continue
 
             item["_source"]        = "99acres"
@@ -1055,18 +856,11 @@ async def fetch_99acres_commercial(
             logger.error(f"[99ACRES] Row {i} exception: {e}", exc_info=True)
 
     inc("99acres_price_filtered", len(out))
-
     pass_rate = round(len(out) / len(rows) * 100, 1) if rows else 0.0
     logger.info(
-        f"[99ACRES] ── Fetch complete ───────────────────────────────────────"
-    )
-    logger.info(
-        f"[99ACRES] db_rows={len(rows)} "
-        f"unique_passed={len(out)} ({pass_rate}%) "
-        f"skipped_duplicate={skipped_duplicate} "
-        f"skipped_unparseable_price={skipped_no_price} "
-        f"skipped_out_of_range={skipped_price_range} "
-        f"skipped_errors={skipped_parse_error}"
+        f"[99ACRES] unique_passed={len(out)} ({pass_rate}%) "
+        f"dup={skipped_duplicate} no_price={skipped_no_price} "
+        f"out_of_range={skipped_price_range} errors={skipped_parse_error}"
     )
     return out
 
@@ -1074,13 +868,7 @@ async def fetch_99acres_commercial(
 async def fetch_magicbricks_commercial(
     city: str, min_price: float, max_price: float, listing_type: str
 ) -> List[dict]:
-    logger.info(
-        f"[MAGICBRICKS] ── Fetch start ─────────────────────────────────────"
-    )
-    logger.info(
-        f"[MAGICBRICKS] city={city!r} listing_type={listing_type} "
-        f"price_range=[₹{min_price:,.0f} – ₹{max_price:,.0f}]"
-    )
+    logger.info(f"[MAGICBRICKS] city={city!r} listing_type={listing_type} price=[₹{min_price:,.0f}–₹{max_price:,.0f}]")
 
     sql = r"""
         SELECT scraped_data
@@ -1098,21 +886,11 @@ async def fetch_magicbricks_commercial(
           AND scraped_data->>'from_url' ILIKE '%commercial-real-estate%'
     """
     t0   = time.monotonic()
-    rows = await _db_fetch(
-        sql,
-        listing_type,
-        f"%{city}%",
-        int(min_price),
-        int(max_price),
-        f"%cityName={city}%",
-    )
+    rows = await _db_fetch(sql, listing_type, f"%{city}%", int(min_price), int(max_price), f"%cityName={city}%")
     db_ms = round((time.monotonic() - t0) * 1000, 1)
 
     inc("magicbricks_rows_fetched", len(rows))
-    logger.info(
-        f"[MAGICBRICKS] DB returned {len(rows)} rows in {db_ms}ms "
-        f"(price filter ₹{min_price:,.0f}–₹{max_price:,.0f} applied in SQL)"
-    )
+    logger.info(f"[MAGICBRICKS] DB returned {len(rows)} rows in {db_ms}ms")
 
     out:               List[dict] = []
     seen_ids:          set        = set()
@@ -1124,11 +902,7 @@ async def fetch_magicbricks_commercial(
     for i, row in enumerate(rows):
         try:
             raw  = row["scraped_data"]
-            item = (
-                json.loads(raw) if isinstance(raw, str)
-                else raw         if isinstance(raw, dict)
-                else None
-            )
+            item = json.loads(raw) if isinstance(raw, str) else raw if isinstance(raw, dict) else None
             if item is None:
                 skipped_bad_price += 1
                 continue
@@ -1136,10 +910,6 @@ async def fetch_magicbricks_commercial(
             listing_id = str(item.get("id", ""))
             if listing_id and listing_id in seen_ids:
                 skipped_duplicate += 1
-                logger.debug(
-                    f"[MAGICBRICKS] Row {i} id={listing_id} "
-                    f"skipped: duplicate id"
-                )
                 continue
             if listing_id:
                 seen_ids.add(listing_id)
@@ -1147,31 +917,19 @@ async def fetch_magicbricks_commercial(
             price = item.get("price")
             if price is None:
                 skipped_no_price += 1
-                logger.debug(
-                    f"[MAGICBRICKS] Row {i} id={item.get('id')} "
-                    f"skipped: price field null"
-                )
                 continue
             try:
                 price_float = float(price)
             except (ValueError, TypeError):
                 skipped_bad_price += 1
-                logger.warning(
-                    f"[MAGICBRICKS] Row {i} id={item.get('id')} "
-                    f"skipped: non-numeric price='{price}'"
-                )
                 continue
 
-            loc       = str(item.get("location", "") or "")
-            cov_area  = str(item.get("covered_area",  "") or "")
-            carp_area = str(item.get("carpet_area",   "") or "")
+            loc         = str(item.get("location",     "") or "")
+            cov_area    = str(item.get("covered_area",  "") or "")
+            carp_area   = str(item.get("carpet_area",   "") or "")
             fingerprint = f"{int(price_float)}:{loc}:{cov_area}:{carp_area}"
             if fingerprint in seen_fingerprints:
                 skipped_duplicate += 1
-                logger.debug(
-                    f"[MAGICBRICKS] Row {i} id={listing_id} "
-                    f"skipped: same project+price+area+location listed by different broker"
-                )
                 continue
             seen_fingerprints.add(fingerprint)
 
@@ -1185,23 +943,12 @@ async def fetch_magicbricks_commercial(
             logger.error(f"[MAGICBRICKS] Row {i} exception: {e}", exc_info=True)
 
     inc("magicbricks_price_filtered", len(out))
-
     pass_rate      = round(len(out) / len(rows) * 100, 1) if rows else 0.0
     with_coords    = sum(1 for item in out if item.get("location"))
     without_coords = len(out) - with_coords
-
     logger.info(
-        f"[MAGICBRICKS] ── Fetch complete ──────────────────────────────────"
-    )
-    logger.info(
-        f"[MAGICBRICKS] db_rows={len(rows)} "
-        f"unique_passed={len(out)} ({pass_rate}%) "
-        f"skipped_duplicate={skipped_duplicate} "
-        f"skipped_null_price={skipped_no_price} "
-        f"skipped_bad_price={skipped_bad_price}"
-    )
-    logger.info(
-        f"[MAGICBRICKS] Coordinate availability for Google Places: "
+        f"[MAGICBRICKS] unique_passed={len(out)} ({pass_rate}%) "
+        f"dup={skipped_duplicate} null_price={skipped_no_price} bad_price={skipped_bad_price} "
         f"have_coords={with_coords} no_coords={without_coords}"
     )
     return out
@@ -1215,26 +962,15 @@ async def fetch_all_commercial(
         f"{hashlib.md5(f'{city.lower()}:{int(min_price)}:{int(max_price)}'.encode()).hexdigest()}"
     )
 
-    logger.info(
-        f"[FETCH] ── Combined fetch ─────────────────────────────────────────"
-    )
-    logger.info(
-        f"[FETCH] city={city!r} listing_type={listing_type} "
-        f"cache_key_suffix=...{cache_key[-12:]}"
-    )
-
     cached = await RedisCache.get(cache_key)
     if cached is not None:
         n99 = len(cached.get("99acres",     []))
         nmb = len(cached.get("magicbricks", []))
         inc("property_cache_hits" if (n99 + nmb) > 0 else "property_empty_cache_hits")
-        logger.info(
-            f"[FETCH] Redis cache HIT — no DB queries needed "
-            f"99acres={n99} magicbricks={nmb} total={n99+nmb}"
-        )
+        logger.info(f"[FETCH] Redis cache HIT 99acres={n99} magicbricks={nmb} total={n99+nmb}")
         return cached
 
-    logger.info(f"[FETCH] Redis cache MISS — fetching both sources in parallel")
+    logger.info(f"[FETCH] Cache MISS — querying city={city!r} listing_type={listing_type}")
     t0       = time.monotonic()
     r99, rmb = await asyncio.gather(
         fetch_99acres_commercial(city, min_price, max_price, listing_type),
@@ -1247,14 +983,13 @@ async def fetch_all_commercial(
         "99acres":     r99 if isinstance(r99, list) else [],
         "magicbricks": rmb if isinstance(rmb, list) else [],
     }
-
     if isinstance(r99, Exception):
-        logger.error(f"[FETCH] 99acres raised exception: {r99}")
+        logger.error(f"[FETCH] 99acres exception: {r99}")
     if isinstance(rmb, Exception):
-        logger.error(f"[FETCH] MagicBricks raised exception: {rmb}")
+        logger.error(f"[FETCH] MagicBricks exception: {rmb}")
 
-    all_ids:    set  = set()
-    cross_dups: int  = 0
+    all_ids:    set = set()
+    cross_dups: int = 0
     for source in ("99acres", "magicbricks"):
         clean = []
         for item in result[source]:
@@ -1271,15 +1006,8 @@ async def fetch_all_commercial(
     await RedisCache.set(cache_key, result, ttl=ttl)
 
     logger.info(
-        f"[FETCH] ── Fetch summary ──────────────────────────────────────────"
-    )
-    logger.info(
-        f"[FETCH] 99acres={len(result['99acres'])} "
-        f"magicbricks={len(result['magicbricks'])} "
-        f"combined_total={total} "
-        f"cross_source_dups_removed={cross_dups} "
-        f"parallel_elapsed={fetch_ms}ms "
-        f"cached_TTL={ttl}s"
+        f"[FETCH] 99acres={len(result['99acres'])} magicbricks={len(result['magicbricks'])} "
+        f"total={total} cross_dups={cross_dups} elapsed={fetch_ms}ms TTL={ttl}s"
     )
     return result
 
@@ -1292,108 +1020,42 @@ async def _apply_filters(
     min_area:      float,
     max_area:      float,
 ) -> Dict[str, List[dict]]:
-
     total_input = sum(len(v) for v in props_by_src.values())
-
     logger.info(
-        f"[FILTER] ════════════════════════════════════════════════════════"
-    )
-    logger.info(
-        f"[FILTER] Stage 0 — Input "
-        f"99acres={len(props_by_src.get('99acres',[]))} "
-        f"magicbricks={len(props_by_src.get('magicbricks',[]))} "
-        f"total={total_input}"
-    )
-    logger.info(
-        f"[FILTER] Criteria: type={property_type} zone={property_zone} "
-        f"area_type={area_type} area=[{min_area}–{max_area}sqft]"
+        f"[FILTER] input={total_input} "
+        f"(99acres={len(props_by_src.get('99acres',[]))} mb={len(props_by_src.get('magicbricks',[]))}) "
+        f"type={property_type} zone={property_zone} area_type={area_type} area=[{min_area}–{max_area}sqft]"
     )
 
-    logger.info(f"[FILTER] ── Stage 1: Property type filter ────────────────")
     pre_type: Dict[str, List[dict]] = {}
     for source, items in props_by_src.items():
-        passed   = [i for i in items if matches_property_type(i, property_type)]
-        rejected = len(items) - len(passed)
+        passed = [i for i in items if matches_property_type(i, property_type)]
         pre_type[source] = passed
-        logger.info(
-            f"[FILTER] type={property_type!r} source={source}: "
-            f"input={len(items)} passed={len(passed)} rejected={rejected}"
-        )
+        logger.info(f"[FILTER] Stage1 type={property_type!r} source={source}: {len(items)}→{len(passed)} (dropped {len(items)-len(passed)})")
     after_type = sum(len(v) for v in pre_type.values())
-    logger.info(
-        f"[FILTER] Stage 1 result: {after_type}/{total_input} passed type filter "
-        f"(dropped {total_input - after_type})"
-    )
 
-    logger.info(f"[FILTER] ── Stage 2: Zone filter ─────────────────────────")
     pre_zone: Dict[str, List[dict]] = {}
     for source, items in pre_type.items():
-        passed   = [i for i in items if matches_zone(i, property_zone)]
-        rejected = len(items) - len(passed)
+        passed = [i for i in items if matches_zone(i, property_zone)]
         pre_zone[source] = passed
-        logger.info(
-            f"[FILTER] zone={property_zone!r} source={source}: "
-            f"input={len(items)} passed={len(passed)} rejected={rejected}"
-        )
+        logger.info(f"[FILTER] Stage2 zone={property_zone!r} source={source}: {len(items)}→{len(passed)} (dropped {len(items)-len(passed)})")
     after_zone = sum(len(v) for v in pre_zone.values())
-    logger.info(
-        f"[FILTER] Stage 2 result: {after_zone}/{after_type} passed zone filter "
-        f"(dropped {after_type - after_zone})"
-    )
 
-    all_pre = [
-        (source, item)
-        for source, items in pre_zone.items()
-        for item in items
-    ]
+    all_pre = [(source, item) for source, items in pre_zone.items() for item in items]
 
     if not all_pre:
-        logger.warning(
-            f"[FILTER] Zero items survived type+zone. "
-            f"type={property_type!r} zone={property_zone!r} — "
-            f"check data has matching keywords or try broader filters"
-        )
+        logger.warning(f"[FILTER] Zero items after type+zone. type={property_type!r} zone={property_zone!r}")
         return {src: [] for src in props_by_src}
 
-    logger.info(f"[FILTER] ── Stage 3: Area type detection ─────────────────")
-    logger.info(
-        f"[FILTER] Running area type detection on {len(all_pre)} items "
-        f"targeting='{area_type}'"
+    needs_gp = sum(
+        1 for _, item in all_pre
+        if _detect_area_type_sync(item) is None and _parse_coordinates(item)[0] is not None
     )
-
-    needs_gp_count  = 0
-    sync_count      = 0
-    no_signal_count = 0
-    for _, item in all_pre:
-        sync_result = _detect_area_type_sync(item)
-        if sync_result is not None:
-            sync_count += 1
-        else:
-            lat, lng = _parse_coordinates(item)
-            if lat is not None:
-                needs_gp_count += 1
-            else:
-                no_signal_count += 1
-
-    logger.info(
-        f"[FILTER] Area type detection method breakdown for {len(all_pre)} items: "
-        f"sync_ppsf/price_band={sync_count} "
-        f"needs_google_places={needs_gp_count} "
-        f"no_signal_default_middle={no_signal_count}"
-    )
-    if needs_gp_count > 0:
-        logger.info(
-            f"[FILTER] Google Places: will call API for up to {needs_gp_count} items "
-            f"(concurrency={settings.GOOGLE_PLACES_CONCURRENCY} "
-            f"cache may reduce actual calls)"
-        )
+    logger.info(f"[FILTER] Stage3 area_type detection: {len(all_pre)} items needs_gp={needs_gp}")
 
     t0         = time.monotonic()
-    area_types = await asyncio.gather(
-        *[detect_area_type(item) for _, item in all_pre],
-        return_exceptions=True,
-    )
-    detect_ms = round((time.monotonic() - t0) * 1000, 1)
+    area_types = await asyncio.gather(*[detect_area_type(item) for _, item in all_pre], return_exceptions=True)
+    detect_ms  = round((time.monotonic() - t0) * 1000, 1)
 
     detected_dist: Dict[str, int] = {}
     for det in area_types:
@@ -1401,38 +1063,22 @@ async def _apply_filters(
         detected_dist[k] = detected_dist.get(k, 0) + 1
 
     logger.info(
-        f"[FILTER] Area type detection complete in {detect_ms}ms"
-    )
-    logger.info(
-        f"[FILTER] Detected distribution across {len(all_pre)} items: "
-        f"high_street={detected_dist.get('high_street', 0)} "
-        f"middle_street={detected_dist.get('middle_street', 0)} "
-        f"low_street={detected_dist.get('low_street', 0)} "
-        f"errors={detected_dist.get('error', 0)}"
-    )
-    logger.info(
-        f"[FILTER] Items matching requested area_type='{area_type}': "
-        f"{detected_dist.get(area_type, 0)} of {len(all_pre)}"
-    )
-
-    logger.info(f"[FILTER] ── Stage 4: Area range filter ───────────────────")
-    logger.info(
-        f"[FILTER] Keeping area_type={area_type!r} "
-        f"AND sqft in [{min_area}–{max_area}]"
+        f"[FILTER] Stage3 done in {detect_ms}ms: "
+        f"high={detected_dist.get('high_street',0)} "
+        f"middle={detected_dist.get('middle_street',0)} "
+        f"low={detected_dist.get('low_street',0)} "
+        f"errors={detected_dist.get('error',0)} "
+        f"target='{area_type}' matches={detected_dist.get(area_type,0)}"
     )
 
     filtered:           Dict[str, List[dict]] = {src: [] for src in props_by_src}
     skipped_area_type:  int = 0
     skipped_area_range: int = 0
     soft_pass_no_area:  int = 0
-    area_checked:       int = 0
 
     for (source, item), detected in zip(all_pre, area_types):
         if isinstance(detected, Exception):
-            logger.warning(
-                f"[FILTER] detect_area_type exception for id={item.get('id')}: "
-                f"{detected} — treating as middle_street"
-            )
+            logger.warning(f"[FILTER] detect_area_type error id={item.get('id')}: {detected}", exc_info=detected)
             detected = "middle_street"
 
         item["_detected_area_type"] = detected
@@ -1442,68 +1088,31 @@ async def _apply_filters(
             continue
 
         area = _extract_area_sqft(item)
-        area_checked += 1
-
         if area is not None:
             if not (min_area <= area <= max_area):
                 skipped_area_range += 1
-                logger.debug(
-                    f"[FILTER] id={item.get('id')} source={source} "
-                    f"rejected: area={area:.0f}sqft not in [{min_area}–{max_area}]"
-                )
                 continue
         else:
             soft_pass_no_area += 1
-            logger.debug(
-                f"[FILTER] id={item.get('id')} source={source} "
-                f"soft-pass: no numeric area found in any field"
-            )
 
         filtered[source].append(item)
 
     total_passed = sum(len(v) for v in filtered.values())
-
     logger.info(
-        f"[FILTER] ════════════════════════════════════════════════════════"
+        f"[FILTER] Summary: {total_passed}/{total_input} passed "
+        f"({round(total_passed/max(total_input,1)*100,1)}%) "
+        f"dropped_type={total_input-after_type} dropped_zone={after_type-after_zone} "
+        f"dropped_area_type={skipped_area_type} dropped_area_range={skipped_area_range} "
+        f"soft_pass_no_area={soft_pass_no_area} "
+        f"99acres={len(filtered.get('99acres',[]))} mb={len(filtered.get('magicbricks',[]))}"
     )
-    logger.info(f"[FILTER] Pipeline summary")
-    logger.info(f"[FILTER]   Stage 0 input:              {total_input}")
-    logger.info(f"[FILTER]   Stage 1 after type:         {after_type}  (dropped {total_input - after_type})")
-    logger.info(f"[FILTER]   Stage 2 after zone:         {after_zone}  (dropped {after_type - after_zone})")
-    logger.info(
-        f"[FILTER]   Stage 3 area_type match:    "
-        f"{detected_dist.get(area_type, 0)}  "
-        f"(dropped {skipped_area_type} wrong area_type)"
-    )
-    logger.info(
-        f"[FILTER]   Stage 4 after area range:   {total_passed}  "
-        f"(checked={area_checked} "
-        f"rejected_range={skipped_area_range} "
-        f"soft_pass_no_area={soft_pass_no_area})"
-    )
-    logger.info(
-        f"[FILTER]   Final: {total_passed}/{total_input} "
-        f"({round(total_passed / max(total_input, 1) * 100, 1)}%) "
-        f"99acres={len(filtered.get('99acres', []))} "
-        f"magicbricks={len(filtered.get('magicbricks', []))}"
-    )
-
     gp_calls = _metrics.get("google_places_calls",      0)
     gp_hits  = _metrics.get("google_places_cache_hits", 0)
     logger.info(
-        f"[FILTER] Google Places lifetime totals: "
-        f"api_calls={gp_calls} "
-        f"cache_hits={gp_hits} "
-        f"hit_rate={round(gp_hits / max(gp_calls + gp_hits, 1) * 100, 1)}% "
-        f"high={_metrics.get('google_places_high_street', 0)} "
-        f"middle={_metrics.get('google_places_middle_street', 0)} "
-        f"low={_metrics.get('google_places_low_street', 0)} "
-        f"errors={_metrics.get('google_places_errors', 0)}"
+        f"[FILTER] GP totals: calls={gp_calls} hits={gp_hits} "
+        f"hit_rate={round(gp_hits/max(gp_calls+gp_hits,1)*100,1)}% "
+        f"errors={_metrics.get('google_places_errors',0)}"
     )
-    logger.info(
-        f"[FILTER] ════════════════════════════════════════════════════════"
-    )
-
     return filtered
 
 
@@ -1528,14 +1137,9 @@ def _compute_market_stats(all_items: List[dict]) -> dict:
 
 
 def _score_feasibility(
-    user_min_price: float,
-    user_max_price: float,
-    user_min_area:  float,
-    user_max_area:  float,
-    area_type:      str,
-    property_zone:  str,
-    stats:          dict,
-    total_matched:  int,
+    user_min_price: float, user_max_price: float,
+    user_min_area:  float, user_max_area:  float,
+    area_type: str, property_zone: str, stats: dict, total_matched: int,
 ) -> dict:
     avg_price = stats["avg_price"]
     if avg_price == 0:
@@ -1582,17 +1186,11 @@ def _score_feasibility(
     }
 
     logger.info(
-        f"[SCORE] budget={budget_score}/25 (avg_market=₹{avg_price:,.0f}) "
-        f"area={area_score}/25 (avg_area={avg_area:.0f}sqft) "
-        f"zone={zone_score}/25 (matched={total_matched}) "
-        f"location={location_score}/25 ({area_type}+{property_zone}) "
-        f"total={total}/100 → {status}"
+        f"[SCORE] budget={budget_score}/25 area={area_score}/25 "
+        f"zone={zone_score}/25 location={location_score}/25 total={total}/100 → {status}"
     )
-
     return {
-        "status":  status,
-        "score":   total,
-        "verdict": verdicts[status],
+        "status": status, "score": total, "verdict": verdicts[status],
         "breakdown": {
             "budget_score":   f"{budget_score}/25",
             "area_score":     f"{area_score}/25",
@@ -1622,7 +1220,6 @@ def _clean_item_for_response(item: dict) -> dict:
     area_numeric  = _extract_area_sqft(item)
     source        = item.get("_source", "")
     detected      = item.get("_detected_area_type", "middle_street")
-
     bedrooms_raw  = str(item.get("bedrooms", "") or "").strip().lower()
     is_project    = bedrooms_raw in ("bare bhk", "ready bhk", "shop bhk", "see configurations", "bare", "n/a")
 
@@ -1633,18 +1230,11 @@ def _clean_item_for_response(item: dict) -> dict:
     clean["_detected_area_type"]      = detected
     clean["_computed_price_per_sqft"] = (
         round(price_numeric / area_numeric, 0)
-        if price_numeric and area_numeric and area_numeric > 0
-        else None
+        if price_numeric and area_numeric and area_numeric > 0 else None
     )
-    clean["_listing_kind"] = (
-        "project_level" if (source == "99acres" and is_project)
-        else "individual_unit"
-    )
+    clean["_listing_kind"] = "project_level" if (source == "99acres" and is_project) else "individual_unit"
     if clean["_listing_kind"] == "project_level":
-        clean["_area_note"] = (
-            "Project-level listing — individual unit sizes vary. "
-            "Check builder page for exact configurations."
-        )
+        clean["_area_note"] = "Project-level listing — unit sizes vary. Check builder page for configurations."
     return clean
 
 
@@ -1664,8 +1254,33 @@ class RangeField(BaseModel):
         return self
 
 
+def _validate_city(v: str) -> str:
+    v = v.strip()
+    if not re.match(r"^[a-zA-Z\s\-]+$", v):
+        raise ValueError("City must contain only letters, spaces, or hyphens")
+    if len(v) < 3:
+        raise ValueError("City name must be at least 3 characters")
+    return normalize_city_input(v)
+
+def _validate_zone(v: str) -> str:
+    if v not in VALID_PROPERTY_ZONES:
+        raise ValueError(f"Must be one of {sorted(VALID_PROPERTY_ZONES)}")
+    return v
+
+def _validate_area_type(v: str) -> str:
+    if v not in VALID_AREA_TYPES:
+        raise ValueError(f"Must be one of {sorted(VALID_AREA_TYPES)}")
+    return v
+
+def _validate_property_type(v: str) -> str:
+    n = v.strip().lower().replace(" ", "_").replace("-", "_")
+    if n not in VALID_PROPERTY_TYPES:
+        raise ValueError(f"Invalid property_type '{v}'. Valid: {sorted(VALID_PROPERTY_TYPES)}")
+    return n
+
+
 class BusinessRentInput(BaseModel):
-    city:          str        = Field(..., min_length=2, max_length=60)
+    city:          str        = Field(..., min_length=3, max_length=60)
     property_zone: str        = Field(...)
     area_type:     str        = Field(...)
     property_area: RangeField
@@ -1674,37 +1289,23 @@ class BusinessRentInput(BaseModel):
 
     @field_validator("city")
     @classmethod
-    def validate_city(cls, v: str) -> str:
-        v = v.strip()
-        if not re.match(r"^[a-zA-Z\s\-]+$", v):
-            raise ValueError("City must contain only letters, spaces, or hyphens")
-        return normalize_city_input(v)
+    def rent_validate_city(cls, v: str) -> str: return _validate_city(v)
 
     @field_validator("property_zone")
     @classmethod
-    def validate_zone(cls, v: str) -> str:
-        if v not in VALID_PROPERTY_ZONES:
-            raise ValueError(f"Must be one of {sorted(VALID_PROPERTY_ZONES)}")
-        return v
+    def rent_validate_zone(cls, v: str) -> str: return _validate_zone(v)
 
     @field_validator("area_type")
     @classmethod
-    def validate_area_type(cls, v: str) -> str:
-        if v not in VALID_AREA_TYPES:
-            raise ValueError(f"Must be one of {sorted(VALID_AREA_TYPES)}")
-        return v
+    def rent_validate_area_type(cls, v: str) -> str: return _validate_area_type(v)
 
     @field_validator("property_type")
     @classmethod
-    def validate_property_type(cls, v: str) -> str:
-        n = v.strip().lower().replace(" ", "_").replace("-", "_")
-        if n not in VALID_PROPERTY_TYPES:
-            raise ValueError(f"Invalid property_type '{v}'. Valid: {sorted(VALID_PROPERTY_TYPES)}")
-        return n
+    def rent_validate_property_type(cls, v: str) -> str: return _validate_property_type(v)
 
 
 class BusinessBuyInput(BaseModel):
-    city:              str        = Field(..., min_length=2, max_length=60)
+    city:              str        = Field(..., min_length=3, max_length=60)
     property_zone:     str        = Field(...)
     area_type:         str        = Field(...)
     property_area:     RangeField
@@ -1713,157 +1314,80 @@ class BusinessBuyInput(BaseModel):
 
     @field_validator("city")
     @classmethod
-    def validate_city(cls, v: str) -> str:
-        v = v.strip()
-        if not re.match(r"^[a-zA-Z\s\-]+$", v):
-            raise ValueError("City must contain only letters, spaces, or hyphens")
-        return normalize_city_input(v)
+    def buy_validate_city(cls, v: str) -> str: return _validate_city(v)
 
     @field_validator("property_zone")
     @classmethod
-    def validate_zone(cls, v: str) -> str:
-        if v not in VALID_PROPERTY_ZONES:
-            raise ValueError(f"Must be one of {sorted(VALID_PROPERTY_ZONES)}")
-        return v
+    def buy_validate_zone(cls, v: str) -> str: return _validate_zone(v)
 
     @field_validator("area_type")
     @classmethod
-    def validate_area_type(cls, v: str) -> str:
-        if v not in VALID_AREA_TYPES:
-            raise ValueError(f"Must be one of {sorted(VALID_AREA_TYPES)}")
-        return v
+    def buy_validate_area_type(cls, v: str) -> str: return _validate_area_type(v)
 
     @field_validator("property_type")
     @classmethod
-    def validate_property_type(cls, v: str) -> str:
-        n = v.strip().lower().replace(" ", "_").replace("-", "_")
-        if n not in VALID_PROPERTY_TYPES:
-            raise ValueError(f"Invalid property_type '{v}'. Valid: {sorted(VALID_PROPERTY_TYPES)}")
-        return n
+    def buy_validate_property_type(cls, v: str) -> str: return _validate_property_type(v)
 
 
 async def build_feasibility_report(
-    city:          str,
-    property_zone: str,
-    area_type:     str,
-    min_area:      float,
-    max_area:      float,
-    min_price:     float,
-    max_price:     float,
-    property_type: str,
-    listing_type:  str,
-    page:          int,
-    page_size:     int,
+    city: str, property_zone: str, area_type: str,
+    min_area: float, max_area: float,
+    min_price: float, max_price: float,
+    property_type: str, listing_type: str,
+    page: int, page_size: int,
 ) -> dict:
     t_start = time.monotonic()
-
     logger.info(
-        f"[REPORT] ╔══════════════════════════════════════════════════════╗"
-    )
-    logger.info(
-        f"[REPORT] ║  {listing_type} feasibility report starting{' '*(19-len(listing_type))}║"
-    )
-    logger.info(
-        f"[REPORT] ╚══════════════════════════════════════════════════════╝"
-    )
-    logger.info(
-        f"[REPORT] city={city!r} type={property_type} zone={property_zone} "
-        f"area_type={area_type} "
-        f"price=[₹{min_price:,.0f}–₹{max_price:,.0f}] "
-        f"area=[{min_area}–{max_area}sqft] "
-        f"page={page} page_size={page_size}"
+        f"[REPORT] START city={city!r} type={property_type} zone={property_zone} "
+        f"area_type={area_type} price=[₹{min_price:,.0f}–₹{max_price:,.0f}] "
+        f"area=[{min_area}–{max_area}sqft] listing={listing_type} page={page}/{page_size}"
     )
 
     raw_props      = await fetch_all_commercial(city, min_price, max_price, listing_type)
-    filtered_props = await _apply_filters(
-        raw_props, property_type, property_zone, area_type, min_area, max_area
-    )
+    filtered_props = await _apply_filters(raw_props, property_type, property_zone, area_type, min_area, max_area)
 
-    all_filtered  = (
-        filtered_props.get("99acres",     []) +
-        filtered_props.get("magicbricks", [])
-    )
+    all_filtered  = filtered_props.get("99acres", []) + filtered_props.get("magicbricks", [])
     total_matched = len(all_filtered)
 
-    logger.info(
-        f"[REPORT] Filter complete: total_matched={total_matched} "
-        f"(99acres={len(filtered_props.get('99acres',[]))} "
-        f"magicbricks={len(filtered_props.get('magicbricks',[]))})"
-    )
-
     if total_matched == 0:
-        logger.warning(
-            f"[REPORT] NO_DATA — zero properties passed all filters for city={city!r}. "
-            f"Suggestions: broaden price range ₹{min_price:,.0f}–₹{max_price:,.0f}, "
-            f"area {min_area}–{max_area}sqft, or try zone='back_site' / area_type='middle_street'"
-        )
+        logger.warning(f"[REPORT] NO_DATA for city={city!r} — broaden filters")
         return {
             "listing_type": listing_type,
-            "feasibility_summary": {
-                "status":  "NO_DATA",
-                "score":   0,
-                "verdict": "No matching properties found — try broadening your filters",
-            },
-            "budget_analysis":        {},
-            "area_analysis":          {},
+            "feasibility_summary": {"status": "NO_DATA", "score": 0, "verdict": "No matching properties found — try broadening your filters"},
+            "budget_analysis": {}, "area_analysis": {},
             "location_analysis":      {"city": city, "area_type": area_type, "property_zone": property_zone},
             "property_type_analysis": {"requested_type": property_type, "total_available": 0},
-            "score_breakdown":        {},
-            "properties":             {
-                "total": 0, "page": page, "page_size": page_size,
-                "total_pages": 0, "items": {"99acres": [], "magicbricks": []},
-            },
+            "score_breakdown": {},
+            "properties": {"total": 0, "page": page, "page_size": page_size, "total_pages": 0, "items": {"99acres": [], "magicbricks": []}},
         }
 
     stats       = _compute_market_stats(all_filtered)
-    feasibility = _score_feasibility(
-        min_price, max_price, min_area, max_area,
-        area_type, property_zone, stats, total_matched,
-    )
-    b_status = _budget_status(min_price, max_price, stats["avg_price"])
-    a_status = _area_status(min_area, max_area, stats["avg_area"])
+    feasibility = _score_feasibility(min_price, max_price, min_area, max_area, area_type, property_zone, stats, total_matched)
+    b_status    = _budget_status(min_price, max_price, stats["avg_price"])
+    a_status    = _area_status(min_area,  max_area,  stats["avg_area"])
 
     logger.info(
-        f"[REPORT] Market stats: "
-        f"avg_price=₹{stats['avg_price']:,.0f} [{b_status}] "
-        f"min=₹{stats['min_price']:,.0f} max=₹{stats['max_price']:,.0f} "
-        f"avg_area={stats['avg_area']:.0f}sqft [{a_status}] "
-        f"avg_ppsf=₹{stats['avg_price_sqft']:,.0f}"
+        f"[REPORT] Market: avg_price=₹{stats['avg_price']:,.0f} [{b_status}] "
+        f"avg_area={stats['avg_area']:.0f}sqft [{a_status}] avg_ppsf=₹{stats['avg_price_sqft']:,.0f}"
     )
 
     budget_analysis = (
-        {
-            "min_rent_given":      min_price,
-            "max_rent_given":      max_price,
-            "avg_market_rent":     stats["avg_price"],
-            "cheapest_available":  stats["min_price"],
-            "costliest_available": stats["max_price"],
-            "budget_status":       b_status,
-            "properties_in_range": total_matched,
-        }
+        {"min_rent_given": min_price, "max_rent_given": max_price, "avg_market_rent": stats["avg_price"],
+         "cheapest_available": stats["min_price"], "costliest_available": stats["max_price"],
+         "budget_status": b_status, "properties_in_range": total_matched}
         if listing_type == "commercial_rent"
-        else {
-            "min_budget_given":    min_price,
-            "max_budget_given":    max_price,
-            "avg_market_price":    stats["avg_price"],
-            "cheapest_available":  stats["min_price"],
-            "costliest_available": stats["max_price"],
-            "budget_status":       b_status,
-            "properties_in_range": total_matched,
-        }
+        else
+        {"min_budget_given": min_price, "max_budget_given": max_price, "avg_market_price": stats["avg_price"],
+         "cheapest_available": stats["min_price"], "costliest_available": stats["max_price"],
+         "budget_status": b_status, "properties_in_range": total_matched}
     )
-
     area_analysis = {
-        "min_area_given":      min_area,
-        "max_area_given":      max_area,
-        "avg_area_available":  stats["avg_area"],
-        "smallest_available":  stats["min_area"],
-        "largest_available":   stats["max_area"],
-        "area_status":         a_status,
+        "min_area_given": min_area, "max_area_given": max_area,
+        "avg_area_available": stats["avg_area"], "smallest_available": stats["min_area"],
+        "largest_available": stats["max_area"], "area_status": a_status,
         "properties_in_range": total_matched,
     }
-
-    _insight_map: Dict[tuple, str] = {
+    _insight_map = {
         ("high_street",   "front_shop"):  f"High street {city} front shops — premium footfall, highest cost",
         ("high_street",   "first_floor"): f"First floor on high street {city} — good visibility at lower cost",
         ("high_street",   "back_site"):   f"Back site in high street {city} — offices and service businesses",
@@ -1874,66 +1398,40 @@ async def build_feasibility_report(
         ("low_street",    "first_floor"): f"Low street first floor {city} — storage or back-office use",
         ("low_street",    "back_site"):   f"Low street back site {city} — ideal for warehouse, factory, MIDC",
     }
-
     location_analysis = {
-        "city":               city,
-        "area_type":          area_type,
-        "property_zone":      property_zone,
-        "market_insight":     _insight_map.get(
-            (area_type, property_zone),
-            f"{area_type.replace('_', ' ').title()} in {city}",
-        ),
+        "city": city, "area_type": area_type, "property_zone": property_zone,
+        "market_insight": _insight_map.get((area_type, property_zone), f"{area_type.replace('_',' ').title()} in {city}"),
         "price_per_sqft_avg": stats["avg_price_sqft"],
     }
-
     property_type_analysis = {
-        "requested_type":  property_type,
-        "total_available": total_matched,
-        "by_source": {
-            "99acres":     len(filtered_props.get("99acres",     [])),
-            "magicbricks": len(filtered_props.get("magicbricks", [])),
-        },
+        "requested_type": property_type, "total_available": total_matched,
+        "by_source": {"99acres": len(filtered_props.get("99acres", [])), "magicbricks": len(filtered_props.get("magicbricks", []))},
     }
 
     all_sorted  = sorted(all_filtered, key=lambda x: x.get("_price_numeric", float("inf")))
     total_pages = math.ceil(total_matched / page_size)
 
     if page > total_pages:
-        logger.warning(
-            f"[REPORT] page={page} exceeds total_pages={total_pages} "
-            f"for total_matched={total_matched} — 404"
-        )
-        raise HTTPException(
-            status_code=404,
-            detail=f"Page {page} exceeds total pages {total_pages}",
-        )
+        raise HTTPException(status_code=404, detail=f"Page {page} exceeds total pages {total_pages}")
 
     start      = (page - 1) * page_size
     page_items = all_sorted[start: start + page_size]
 
-    logger.info(
-        f"[REPORT] Pagination: total={total_matched} pages={total_pages} "
-        f"current_page={page} page_size={page_size} "
-        f"items_on_page={len(page_items)} "
-        f"[{start+1}–{start+len(page_items)}] sorted_by=price_asc"
-    )
-
     items_99: List[dict] = []
     items_mb: List[dict] = []
     for item in page_items:
-        src = item.get("_source", "")
-        c   = _clean_item_for_response(item)
-        (items_99 if src == "99acres" else items_mb).append(c)
+        c = _clean_item_for_response(item)
+        (items_99 if item.get("_source") == "99acres" else items_mb).append(c)
 
     gp_calls = _metrics.get("google_places_calls",      0)
     gp_hits  = _metrics.get("google_places_cache_hits", 0)
     gp_diag  = {
-        "api_key_configured":        bool(settings.GOOGLE_PLACES_API_KEY),
-        "concurrency_limit":         settings.GOOGLE_PLACES_CONCURRENCY,
+        "api_key_configured": bool(settings.GOOGLE_PLACES_API_KEY),
+        "concurrency_limit":  settings.GOOGLE_PLACES_CONCURRENCY,
         "total_api_calls_lifetime":  gp_calls,
         "total_cache_hits_lifetime": gp_hits,
-        "cache_hit_rate_pct":        round(gp_hits / max(gp_calls + gp_hits, 1) * 100, 1),
-        "total_errors":              _metrics.get("google_places_errors", 0),
+        "cache_hit_rate_pct": round(gp_hits / max(gp_calls + gp_hits, 1) * 100, 1),
+        "total_errors":       _metrics.get("google_places_errors", 0),
         "area_type_results": {
             "high_street":   _metrics.get("google_places_high_street",   0),
             "middle_street": _metrics.get("google_places_middle_street", 0),
@@ -1943,28 +1441,13 @@ async def build_feasibility_report(
 
     total_ms = round((time.monotonic() - t_start) * 1000, 1)
     logger.info(
-        f"[REPORT] ╔══════════════════════════════════════════════════════╗"
-    )
-    logger.info(
-        f"[REPORT] ║  Complete in {total_ms}ms{' '*(40-len(str(total_ms)))}║"
-    )
-    logger.info(
-        f"[REPORT] ╚══════════════════════════════════════════════════════╝"
-    )
-    logger.info(
-        f"[REPORT] status={feasibility['status']} score={feasibility['score']}/100 "
-        f"matched={total_matched} page_items={len(page_items)} "
-        f"gp_api_calls={gp_calls} gp_cache_hits={gp_hits} "
-        f"gp_hit_rate={gp_diag['cache_hit_rate_pct']}%"
+        f"[REPORT] DONE {total_ms}ms status={feasibility['status']} score={feasibility['score']}/100 "
+        f"matched={total_matched} page_items={len(page_items)} gp_calls={gp_calls} gp_hits={gp_hits}"
     )
 
     return {
         "listing_type":              listing_type,
-        "feasibility_summary":       {
-            "status":  feasibility["status"],
-            "score":   feasibility["score"],
-            "verdict": feasibility["verdict"],
-        },
+        "feasibility_summary":       {"status": feasibility["status"], "score": feasibility["score"], "verdict": feasibility["verdict"]},
         "budget_analysis":           budget_analysis,
         "area_analysis":             area_analysis,
         "location_analysis":         location_analysis,
@@ -1972,129 +1455,81 @@ async def build_feasibility_report(
         "score_breakdown":           feasibility["breakdown"],
         "google_places_diagnostics": gp_diag,
         "properties": {
-            "total":       total_matched,
-            "page":        page,
-            "page_size":   page_size,
-            "total_pages": total_pages,
-            "items": {
-                "99acres":     items_99,
-                "magicbricks": items_mb,
-            },
+            "total": total_matched, "page": page, "page_size": page_size, "total_pages": total_pages,
+            "items": {"99acres": items_99, "magicbricks": items_mb},
         },
     }
 
 
-rent_router = APIRouter(
-    prefix="/businessman/rent",
-    tags=["Businessman Feasibility — Rent"],
-)
-buy_router = APIRouter(
-    prefix="/businessman/buy",
-    tags=["Businessman Feasibility — Buy"],
-)
+rent_router = APIRouter(prefix="/businessman/rent", tags=["Businessman Feasibility — Rent"])
+buy_router  = APIRouter(prefix="/businessman/buy",  tags=["Businessman Feasibility — Buy"])
 
 
 @rent_router.post("/feasibility")
 async def businessman_rent_feasibility(
-    request:   Request,
-    data:      BusinessRentInput,
+    request: Request, data: BusinessRentInput,
     page:      int = Query(1,                          ge=1),
     page_size: int = Query(settings.DEFAULT_PAGE_SIZE, ge=1, le=settings.MAX_PAGE_SIZE),
 ):
     inc("requests_total")
     ip = _extract_client_ip(request)
-
     if await RedisRateLimiter.is_rate_limited(ip, prefix="biz_rent"):
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Rate limit exceeded. Try again in a minute."},
-        )
-
+        return JSONResponse(status_code=429, content={"error": "Rate limit exceeded. Try again in a minute."})
     logger.info(
-        f"[BIZ_RENT] ► Request #{_metrics['requests_total']} "
-        f"ip={ip} city={data.city} zone={data.property_zone} "
+        f"[BIZ_RENT] ip={ip} city={data.city} zone={data.property_zone} "
         f"area_type={data.area_type} type={data.property_type} "
         f"rent=[₹{data.monthly_rent.min_range:,.0f}–₹{data.monthly_rent.max_range:,.0f}] "
         f"area=[{data.property_area.min_range}–{data.property_area.max_range}sqft]"
     )
     try:
         result = await build_feasibility_report(
-            city          = data.city,
-            property_zone = data.property_zone,
-            area_type     = data.area_type,
-            min_area      = data.property_area.min_range,
-            max_area      = data.property_area.max_range,
-            min_price     = data.monthly_rent.min_range,
-            max_price     = data.monthly_rent.max_range,
-            property_type = data.property_type,
-            listing_type  = "commercial_rent",
-            page          = page,
-            page_size     = page_size,
+            city=data.city, property_zone=data.property_zone, area_type=data.area_type,
+            min_area=data.property_area.min_range, max_area=data.property_area.max_range,
+            min_price=data.monthly_rent.min_range, max_price=data.monthly_rent.max_range,
+            property_type=data.property_type, listing_type="commercial_rent",
+            page=page, page_size=page_size,
         )
         inc("requests_ok")
-        logger.info(
-            f"[BIZ_RENT] ✓ Request #{_metrics['requests_total']} done "
-            f"ok={_metrics['requests_ok']} errors={_metrics['requests_error']}"
-        )
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         inc("requests_error")
-        logger.error(
-            f"[BIZ_RENT] ✗ Request #{_metrics['requests_total']} unhandled: {e}",
-            exc_info=True,
-        )
+        logger.error(f"[BIZ_RENT] Unhandled: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
 
 @buy_router.post("/feasibility")
 async def businessman_buy_feasibility(
-    request:   Request,
-    data:      BusinessBuyInput,
+    request: Request, data: BusinessBuyInput,
     page:      int = Query(1,                          ge=1),
     page_size: int = Query(settings.DEFAULT_PAGE_SIZE, ge=1, le=settings.MAX_PAGE_SIZE),
 ):
     inc("requests_total")
     ip = _extract_client_ip(request)
-
     if await RedisRateLimiter.is_rate_limited(ip, prefix="biz_buy"):
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Rate limit exceeded. Try again in a minute."},
-        )
-
+        return JSONResponse(status_code=429, content={"error": "Rate limit exceeded. Try again in a minute."})
     logger.info(
-        f"[BIZ_BUY] ► Request #{_metrics['requests_total']} "
-        f"ip={ip} city={data.city} zone={data.property_zone} "
+        f"[BIZ_BUY] ip={ip} city={data.city} zone={data.property_zone} "
         f"area_type={data.area_type} type={data.property_type} "
         f"budget=[₹{data.investment_budget.min_range:,.0f}–₹{data.investment_budget.max_range:,.0f}] "
         f"area=[{data.property_area.min_range}–{data.property_area.max_range}sqft]"
     )
     try:
         result = await build_feasibility_report(
-            city          = data.city,
-            property_zone = data.property_zone,
-            area_type     = data.area_type,
-            min_area      = data.property_area.min_range,
-            max_area      = data.property_area.max_range,
-            min_price     = data.investment_budget.min_range,
-            max_price     = data.investment_budget.max_range,
-            property_type = data.property_type,
-            listing_type  = "commercial_buy",
-            page          = page,
-            page_size     = page_size,
+            city=data.city, property_zone=data.property_zone, area_type=data.area_type,
+            min_area=data.property_area.min_range, max_area=data.property_area.max_range,
+            min_price=data.investment_budget.min_range, max_price=data.investment_budget.max_range,
+            property_type=data.property_type, listing_type="commercial_buy",
+            page=page, page_size=page_size,
         )
         inc("requests_ok")
-        logger.info(
-            f"[BIZ_BUY] ✓ Request #{_metrics['requests_total']} done "
-            f"ok={_metrics['requests_ok']} errors={_metrics['requests_error']}"
-        )
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         inc("requests_error")
-        logger.error(
-            f"[BIZ_BUY] ✗ Request #{_metrics['requests_total']} unhandled: {e}",
-            exc_info=True,
-        )
+        logger.error(f"[BIZ_BUY] Unhandled: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
 
@@ -2113,27 +1548,20 @@ async def _health_check() -> JSONResponse:
         logger.warning(f"[HEALTH] DB check failed: {e}")
 
     overall = "healthy" if (redis_ok and db_ok) else "degraded"
-    logger.info(
-        f"[HEALTH] status={overall} redis={'ok' if redis_ok else 'FAIL'} "
-        f"db={'ok' if db_ok else 'FAIL'} "
-        f"gp_calls={_metrics.get('google_places_calls', 0)} "
-        f"gp_cache_hits={_metrics.get('google_places_cache_hits', 0)}"
-    )
     return JSONResponse(
         status_code=200 if overall == "healthy" else 503,
         content={
-            "status":   overall,
+            "status": overall,
             "redis":    "connected"   if redis_ok else "disconnected",
             "database": "connected"   if db_ok    else "disconnected",
             "google_places": {
-                "configured":          bool(settings.GOOGLE_PLACES_API_KEY),
-                "concurrency_limit":   settings.GOOGLE_PLACES_CONCURRENCY,
-                "api_calls":           _metrics.get("google_places_calls",        0),
-                "cache_hits":          _metrics.get("google_places_cache_hits",   0),
-                "errors":              _metrics.get("google_places_errors",       0),
-                "high_street":         _metrics.get("google_places_high_street",  0),
-                "middle_street":       _metrics.get("google_places_middle_street",0),
-                "low_street":          _metrics.get("google_places_low_street",   0),
+                "configured":    bool(settings.GOOGLE_PLACES_API_KEY),
+                "api_calls":     _metrics.get("google_places_calls",        0),
+                "cache_hits":    _metrics.get("google_places_cache_hits",   0),
+                "errors":        _metrics.get("google_places_errors",       0),
+                "high_street":   _metrics.get("google_places_high_street",  0),
+                "middle_street": _metrics.get("google_places_middle_street",0),
+                "low_street":    _metrics.get("google_places_low_street",   0),
             },
         },
     )
@@ -2150,27 +1578,25 @@ async def buy_health():
 
 async def _metrics_payload() -> dict:
     try:
-        global_raw = await redis_client.hgetall("biz:metrics:global")
+        global_raw     = await redis_client.hgetall("biz:metrics:global")
         global_metrics = {k: int(v) for k, v in global_raw.items()} if global_raw else {}
     except Exception:
         global_metrics = {}
 
     merged = {k: global_metrics.get(k, v) for k, v in _metrics.items()}
-
-    calls = merged.get("google_places_calls",      0)
-    hits  = merged.get("google_places_cache_hits", 0)
-    errs  = merged.get("google_places_errors",     0)
+    calls  = merged.get("google_places_calls",      0)
+    hits   = merged.get("google_places_cache_hits", 0)
+    errs   = merged.get("google_places_errors",     0)
     return {
         "metrics":        merged,
         "metrics_source": "redis_global" if global_metrics else "in_process_fallback",
         "timestamp":      time.time(),
         "google_places_summary": {
-            "api_key_configured":  bool(settings.GOOGLE_PLACES_API_KEY),
-            "concurrency_limit":   settings.GOOGLE_PLACES_CONCURRENCY,
-            "total_calls":         calls,
-            "total_cache_hits":    hits,
-            "cache_hit_rate_pct":  round(hits / max(calls + hits, 1) * 100, 1),
-            "error_rate_pct":      round(errs / max(calls,         1) * 100, 1),
+            "api_key_configured": bool(settings.GOOGLE_PLACES_API_KEY),
+            "total_calls":        calls,
+            "total_cache_hits":   hits,
+            "cache_hit_rate_pct": round(hits / max(calls + hits, 1) * 100, 1),
+            "error_rate_pct":     round(errs / max(calls,         1) * 100, 1),
             "area_type_results": {
                 "high_street":   merged.get("google_places_high_street",   0),
                 "middle_street": merged.get("google_places_middle_street", 0),
@@ -2194,8 +1620,16 @@ async def buy_metrics():
     return await _metrics_payload()
 
 
+def _require_admin(request: Request) -> None:
+    if not settings.ADMIN_API_KEY:
+        return
+    if request.headers.get("X-Admin-Key", "") != settings.ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Admin key required")
+
+
 @rent_router.get("/clear-cache")
-async def rent_clear_cache():
+async def rent_clear_cache(request: Request):
+    _require_admin(request)
     deleted = 0
     for prefix in ("biz:commercial_rent:", "biz_rent:rl:"):
         keys = await RedisCache.keys_by_prefix(prefix)
@@ -2205,7 +1639,8 @@ async def rent_clear_cache():
     return {"status": "cache cleared", "keys_deleted": deleted}
 
 @buy_router.get("/clear-cache")
-async def buy_clear_cache():
+async def buy_clear_cache(request: Request):
+    _require_admin(request)
     deleted = 0
     for prefix in ("biz:commercial_buy:", "biz_buy:rl:"):
         keys = await RedisCache.keys_by_prefix(prefix)
@@ -2216,68 +1651,30 @@ async def buy_clear_cache():
 
 @rent_router.get("/clear-google-cache")
 @buy_router.get("/clear-google-cache")
-async def clear_google_cache():
+async def clear_google_cache(request: Request):
+    _require_admin(request)
     keys    = await RedisCache.keys_by_prefix("gp:area:")
     deleted = await RedisCache.delete(*keys) if keys else 0
-    logger.info(f"[CACHE] Google Places cache cleared: {deleted} coordinate entries")
+    logger.info(f"[CACHE] Google Places cache cleared: {deleted} entries")
     return {"status": "google places cache cleared", "keys_deleted": deleted}
 
 
 @buy_router.get("/db-diagnostic")
 @rent_router.get("/db-diagnostic")
-async def db_diagnostic():
+async def db_diagnostic(request: Request):
+    _require_admin(request)
     results: Dict[str, Any] = {}
+    rows = await _db_fetch("SELECT source, listing_type, COUNT(*) as cnt FROM property_raw_data GROUP BY source, listing_type ORDER BY source, listing_type")
+    results["listing_types_by_source"] = [{"source": r["source"], "listing_type": r["listing_type"], "count": r["cnt"]} for r in rows]
 
-    rows = await _db_fetch("""
-        SELECT source, listing_type, COUNT(*) as cnt
-        FROM property_raw_data
-        GROUP BY source, listing_type
-        ORDER BY source, listing_type
-    """)
-    results["listing_types_by_source"] = [
-        {"source": r["source"], "listing_type": r["listing_type"], "count": r["cnt"]}
-        for r in rows
-    ]
+    rows = await _db_fetch("SELECT scraped_data->>'city_name' as city, COUNT(*) as cnt FROM property_raw_data WHERE source='magicbricks' GROUP BY city ORDER BY cnt DESC LIMIT 30")
+    results["magicbricks_cities"] = [{"city": r["city"], "count": r["cnt"]} for r in rows]
 
-    rows = await _db_fetch("""
-        SELECT scraped_data->>'city_name' as city, COUNT(*) as cnt
-        FROM property_raw_data
-        WHERE source = 'magicbricks'
-        GROUP BY city
-        ORDER BY cnt DESC
-        LIMIT 30
-    """)
-    results["magicbricks_cities"] = [
-        {"city": r["city"], "count": r["cnt"]} for r in rows
-    ]
+    rows = await _db_fetch("SELECT regexp_replace(scraped_data->>'pageUrl','.*keyword=([^&]+).*','\\1') as city, COUNT(*) as cnt FROM property_raw_data WHERE source='99acres' AND scraped_data->>'pageUrl' ILIKE '%keyword=%' GROUP BY city ORDER BY cnt DESC LIMIT 30")
+    results["99acres_cities"] = [{"city": r["city"], "count": r["cnt"]} for r in rows]
 
-    rows = await _db_fetch("""
-        SELECT
-            regexp_replace(
-                scraped_data->>'pageUrl',
-                '.*keyword=([^&]+).*', '\\1'
-            ) as city,
-            COUNT(*) as cnt
-        FROM property_raw_data
-        WHERE source = '99acres'
-          AND scraped_data->>'pageUrl' ILIKE '%keyword=%'
-        GROUP BY city
-        ORDER BY cnt DESC
-        LIMIT 30
-    """)
-    results["99acres_cities"] = [
-        {"city": r["city"], "count": r["cnt"]} for r in rows
-    ]
-
-    rows = await _db_fetch("""
-        SELECT source, COUNT(*) as total
-        FROM property_raw_data
-        GROUP BY source
-        ORDER BY total DESC
-    """)
-    results["total_rows_per_source"] = [
-        {"source": r["source"], "total": r["total"]} for r in rows
-    ]
+    rows = await _db_fetch("SELECT source, COUNT(*) as total FROM property_raw_data GROUP BY source ORDER BY total DESC")
+    results["total_rows_per_source"] = [{"source": r["source"], "total": r["total"]} for r in rows]
 
     logger.info(f"[DIAGNOSTIC] {json.dumps(results, default=str)[:600]}")
     return results

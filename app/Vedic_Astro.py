@@ -28,7 +28,8 @@ logger = logging.getLogger("astrology_api")
 
 class Settings:
     VEDIC_API_KEY:          str   = os.getenv("VEDIC_API_KEY", "")
-    VEDIC_BASE_URL:         str   = os.getenv("VEDIC_BASE_URL", "https://json.vedicastroapi.com/v3-json")
+    VEDIC_BASE_URL:         str   = os.getenv("VEDIC_BASE_URL", "https://api.vedicastroapi.com/v3-json")
+   
     REDIS_URL:              str   = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     REDIS_MAX_CONNECTIONS:  int   = int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))
     CACHE_TTL:              int   = int(os.getenv("ASTRO_CACHE_TTL",       "3600"))
@@ -41,7 +42,7 @@ settings = Settings()
 
 
 
-#  Metrics
+
 
 
 _metrics: dict[str, int] = {
@@ -60,7 +61,7 @@ def inc(key: str, n: int = 1):
 
 
 
-#  Redis  (lazy init)
+
 
 
 _redis_client: redis.Redis = None
@@ -113,7 +114,7 @@ class RedisCache:
 
 
 
-#  Rate Limiter
+
 
 
 class RedisRateLimiter:
@@ -146,7 +147,7 @@ def build_cache_key(endpoint: str, params: dict) -> str:
 
 
 
-#  Core VedicAstroAPI Caller
+
 
 
 async def call_vedic_api(endpoint: str, params: dict) -> dict:
@@ -191,8 +192,14 @@ async def call_vedic_api(endpoint: str, params: dict) -> dict:
                 )
 
             data = response.json()
-            ttl  = settings.CACHE_TTL if data.get("status") == 200 else settings.CACHE_EMPTY_TTL
-            await RedisCache.set(cache_key, data, ttl=ttl)
+            if data.get("status") != 200:
+                inc("vedic_api_errors")
+                logger.error(f"VedicAPI error [{endpoint}]: status={data.get('status')} msg={data.get('response')}")
+                raise HTTPException(
+                    status_code=data.get("status", 400),
+                    detail=data.get("response", "Bad request to VedicAstroAPI")
+                )
+            await RedisCache.set(cache_key, data, ttl=settings.CACHE_TTL)
             logger.info(f"VedicAPI success [{endpoint}]")
             return data
 
@@ -211,7 +218,7 @@ async def call_vedic_api(endpoint: str, params: dict) -> dict:
 
 
 
-#  Pydantic Models  (one per parameter group)
+
 
 
 class KundliParams(BaseModel):
@@ -270,17 +277,17 @@ class PanchangMonthlyParams(BaseModel):
 
 class MatchingParams(BaseModel):
     """Group 6 — Matching (Two people)"""
-    m_dob: str   = Field(..., example="15/8/1990")
-    m_tob: str   = Field(..., example="10:30")
-    m_lat: float = Field(..., example=26.85)
-    m_lon: float = Field(..., example=75.79)
-    m_tz:  float = Field(..., example=5.5)
-    f_dob: str   = Field(..., example="20/5/1992")
-    f_tob: str   = Field(..., example="08:00")
-    f_lat: float = Field(..., example=28.61)
-    f_lon: float = Field(..., example=77.20)
-    f_tz:  float = Field(..., example=5.5)
-    lang:  str   = Field("en", example="en")
+    boy_dob: str   = Field(..., example="15/8/1990")
+    boy_tob: str   = Field(..., example="10:30")
+    boy_lat: float = Field(..., example=26.85)
+    boy_lon: float = Field(..., example=75.79)
+    boy_tz:  float = Field(..., example=5.5)
+    girl_dob: str  = Field(..., example="20/5/1992")
+    girl_tob: str  = Field(..., example="08:00")
+    girl_lat: float = Field(..., example=28.61)
+    girl_lon: float = Field(..., example=77.20)
+    girl_tz:  float = Field(..., example=5.5)
+    lang:     str   = Field("en", example="en")
 
 
 class MatchingAstroParams(MatchingParams):
@@ -324,7 +331,7 @@ class YearlyParams(KundliParams):
 
 
 
-#  Routers
+
 
 
 prediction_router = APIRouter(prefix="/api/prediction",    tags=["Prediction"])
@@ -339,7 +346,7 @@ health_router     = APIRouter(prefix="/api/astro",         tags=["Health"])
 
 
 
-#  PREDICTION  (10 endpoints)
+
 
 
 @prediction_router.post("/biorhythm")

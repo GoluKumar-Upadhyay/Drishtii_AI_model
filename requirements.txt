@@ -9,3 +9,4 @@ google-cloud-aiplatform
 asyncpg
 psycopg2-binary
 redis
+google-generativeai

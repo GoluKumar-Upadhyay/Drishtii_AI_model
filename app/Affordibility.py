@@ -271,9 +271,7 @@ Format: • Tip1 • Tip2 • Tip3 • Tip4 • Tip5
     return tips
 
 
-# ─────────────────────────────────────────────
-#  Pydantic Models
-# ─────────────────────────────────────────────
+
 
 class FinanceInput(BaseModel):
     salary:       float = Field(..., gt=0,  le=settings.MAX_SALARY)
@@ -316,9 +314,7 @@ class RentInput(BaseModel):
         return v
 
 
-# ─────────────────────────────────────────────
-#  Financial Logic
-# ─────────────────────────────────────────────
+
 
 def salary_projection(salary: float) -> dict:
     return {
